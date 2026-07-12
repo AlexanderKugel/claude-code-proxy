@@ -203,10 +203,17 @@ pub fn build_websocket_request(
 // Response
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActualTransport {
+    Http,
+    WebSocket,
+}
+
 pub struct CodexResponse {
     pub body: Vec<u8>,
     pub status: u16,
     pub headers: Vec<(String, String)>,
+    pub transport: ActualTransport,
 }
 
 // ---------------------------------------------------------------------------
@@ -442,7 +449,10 @@ impl CodexHttpClient {
                             message: failure.message.clone(),
                             detail: Some(failure.message),
                             retry_after: failure.retry_after,
-                            origin: buffered_origin(transport),
+                            origin: match response.transport {
+                                ActualTransport::Http => CodexErrorOrigin::BufferedHttp,
+                                ActualTransport::WebSocket => CodexErrorOrigin::BufferedWebSocket,
+                            },
                         });
                     }
                     log_buffered_retry(
@@ -554,7 +564,7 @@ impl CodexHttpClient {
                             .map(|(_, value)| value.as_str());
                         let delay = compute_backoff_delay(transport_failures, retry_after);
                         if delay.exceeds_budget {
-                            return Err(codex_status_error(response, transport));
+                            return Err(codex_status_error(response));
                         }
                         log_buffered_retry(
                             ctx,
@@ -576,10 +586,10 @@ impl CodexHttpClient {
                         "upstream",
                         "retryable upstream status",
                     );
-                    return Err(codex_status_error(response, transport));
+                    return Err(codex_status_error(response));
                 }
                 Ok(response) if !(200..300).contains(&response.status) => {
-                    return Err(codex_status_error(response, transport));
+                    return Err(codex_status_error(response));
                 }
                 Ok(response) => return Ok(response),
                 Err(err)
@@ -932,6 +942,7 @@ impl CodexHttpClient {
             body: body_bytes,
             status,
             headers,
+            transport: ActualTransport::Http,
         })
     }
 }
@@ -1064,10 +1075,7 @@ fn auth_refresh_error(err: anyhow::Error) -> CodexError {
     }
 }
 
-fn codex_status_error(
-    response: CodexResponse,
-    transport: crate::config::CodexTransport,
-) -> CodexError {
+fn codex_status_error(response: CodexResponse) -> CodexError {
     let retry_after = response
         .headers
         .iter()
@@ -1084,7 +1092,10 @@ fn codex_status_error(
         message: message.clone(),
         detail: Some(message),
         retry_after,
-        origin: buffered_origin(transport),
+        origin: match response.transport {
+            ActualTransport::Http => CodexErrorOrigin::BufferedHttp,
+            ActualTransport::WebSocket => CodexErrorOrigin::BufferedWebSocket,
+        },
     }
 }
 
@@ -1105,15 +1116,6 @@ fn codex_status_error_message(body: &[u8]) -> Option<String> {
                 super::events::classify_event_failure(&payload).map(|failure| failure.message)
             })
         })
-}
-
-fn buffered_origin(transport: crate::config::CodexTransport) -> CodexErrorOrigin {
-    match transport {
-        crate::config::CodexTransport::Http => CodexErrorOrigin::BufferedHttp,
-        crate::config::CodexTransport::WebSocket | crate::config::CodexTransport::Auto => {
-            CodexErrorOrigin::BufferedWebSocket
-        }
-    }
 }
 
 fn should_retry_codex_status(status: u16) -> bool {
@@ -1512,15 +1514,13 @@ mod tests {
 
     #[test]
     fn status_error_preserves_buffered_websocket_event_message() {
-        let error = codex_status_error(
-            CodexResponse {
-                body: b"data: {\"type\":\"error\",\"error\":{\"status\":400,\"message\":\"bad request\"}}\n\n"
-                    .to_vec(),
-                status: 400,
-                headers: Vec::new(),
-            },
-            crate::config::CodexTransport::WebSocket,
-        );
+        let error = codex_status_error(CodexResponse {
+            body: b"data: {\"type\":\"error\",\"error\":{\"status\":400,\"message\":\"bad request\"}}\n\n"
+                .to_vec(),
+            status: 400,
+            headers: Vec::new(),
+            transport: ActualTransport::WebSocket,
+        });
 
         assert_eq!(error.status, 400);
         assert_eq!(error.detail.as_deref(), Some("bad request"));
@@ -1926,6 +1926,7 @@ mod tests {
             body: Vec::new(),
             status: 401,
             headers: Vec::new(),
+            transport: ActualTransport::Http,
         });
         let websocket_unauthorized = Err(CodexError {
             status: 401,

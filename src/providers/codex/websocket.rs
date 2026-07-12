@@ -15,7 +15,7 @@ use tokio_tungstenite::{
 use crate::provider::RequestContext;
 use crate::traffic::TrafficCapture;
 
-use super::client::{CodexError, CodexErrorOrigin, CodexResponse};
+use super::client::{ActualTransport, CodexError, CodexErrorOrigin, CodexResponse};
 use super::continuation::ContinuationCandidate;
 
 // ---------------------------------------------------------------------------
@@ -403,6 +403,7 @@ pub async fn codex_websocket_request(
                 body: sse_body,
                 status,
                 headers: vec![],
+                transport: ActualTransport::WebSocket,
             });
         }
     } else {
@@ -480,6 +481,7 @@ pub async fn codex_websocket_request(
             body: sse_body,
             status,
             headers: vec![],
+            transport: ActualTransport::WebSocket,
         })
     }
 }
@@ -684,6 +686,32 @@ fn write_websocket_response_capture(
 // Connection helper
 // ---------------------------------------------------------------------------
 
+const MAX_HANDSHAKE_ERROR_DETAIL_BYTES: usize = 1024;
+const GENERIC_HANDSHAKE_ERROR_DETAIL: &str = "WebSocket upgrade was rejected";
+
+fn handshake_error_detail(body: Option<&Vec<u8>>) -> String {
+    let Some(value) = body.and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+    else {
+        return GENERIC_HANDSHAKE_ERROR_DETAIL.to_string();
+    };
+    let Some(message) = value
+        .pointer("/error/message")
+        .or_else(|| value.get("message"))
+        .and_then(|value| value.as_str())
+    else {
+        return GENERIC_HANDSHAKE_ERROR_DETAIL.to_string();
+    };
+    let sanitized: String = message
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, ' '))
+        .collect();
+    let mut end = sanitized.len().min(MAX_HANDSHAKE_ERROR_DETAIL_BYTES);
+    while !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    sanitized[..end].to_string()
+}
+
 async fn connect_with_timeout(
     url: &str,
     headers: &HeaderMap,
@@ -740,11 +768,7 @@ async fn connect_with_timeout(
         .map_err(|e| {
             let (status, retry_after, detail) = match &e {
                 tungstenite::Error::Http(response) => {
-                    let detail = response
-                        .body()
-                        .as_ref()
-                        .and_then(|body| String::from_utf8(body.clone()).ok())
-                        .filter(|body| !body.trim().is_empty());
+                    let detail = Some(handshake_error_detail(response.body().as_ref()));
                     (
                         Some(response.status().as_u16()),
                         response
@@ -1331,7 +1355,7 @@ mod tests {
         };
 
         assert_eq!(err.status, 401);
-        assert_eq!(err.detail.as_deref(), Some("policy denied"));
+        assert_eq!(err.detail.as_deref(), Some(GENERIC_HANDSHAKE_ERROR_DETAIL));
         assert_eq!(err.origin, CodexErrorOrigin::WebSocketHandshake);
     }
 
@@ -1366,7 +1390,7 @@ mod tests {
         };
 
         assert_eq!(err.status, 502);
-        assert_eq!(err.detail, None);
+        assert_eq!(err.detail.as_deref(), Some(GENERIC_HANDSHAKE_ERROR_DETAIL));
         assert_eq!(err.retry_after.as_deref(), Some("3"));
         assert_eq!(err.origin, CodexErrorOrigin::WebSocketHandshake);
     }

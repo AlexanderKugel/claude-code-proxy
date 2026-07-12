@@ -771,22 +771,29 @@ fn map_codex_error_to_response(err: &client::CodexError) -> Response {
     }
 
     match err.status {
-        401 | 403 => json_error(
+        401 => json_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
             err.detail.as_deref().unwrap_or("Authentication failed"),
         ),
+        403 => json_error(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            err.detail.as_deref().unwrap_or("Permission denied"),
+        ),
         429 => {
-            let retry_after = err.retry_after.as_deref().unwrap_or("5");
-            let resp = json_error(
+            let response = json_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limit_error",
                 &err.message,
             );
-            let headers = [(http::header::RETRY_AFTER, retry_after)];
-            (headers, resp).into_response()
+            if let Some(retry_after) = err.retry_after.as_deref() {
+                ([(http::header::RETRY_AFTER, retry_after)], response).into_response()
+            } else {
+                response
+            }
         }
-        status @ (500 | 502 | 503 | 504 | 529)
+        status @ (400..=599)
             if matches!(
                 err.origin,
                 client::CodexErrorOrigin::BufferedHttp
