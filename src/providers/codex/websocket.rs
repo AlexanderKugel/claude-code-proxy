@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use http::HeaderMap;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{self, Message, handshake::client::generate_key},
@@ -486,6 +486,157 @@ pub async fn codex_websocket_request(
     }
 }
 
+pub(super) struct ReadyWebSocket {
+    guard: OwnedMutexGuard<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+    entry: Arc<PoolEntry>,
+    used_pooled: bool,
+    pool_key: Option<String>,
+    turn_id: Option<u64>,
+    traffic: Option<Arc<TrafficCapture>>,
+    idle_timeout_ms: u64,
+}
+
+pub(super) async fn prepare_codex_websocket(
+    url: &str,
+    headers: &HeaderMap,
+    traffic: Option<Arc<TrafficCapture>>,
+    pool_key: Option<&str>,
+    turn_id: Option<u64>,
+    connect_timeout_ms: u64,
+    idle_timeout_ms: u64,
+) -> Result<ReadyWebSocket, CodexError> {
+    let ws_url = to_websocket_url(url).map_err(|error| CodexError {
+        status: 0,
+        message: error.message,
+        detail: None,
+        retry_after: None,
+        origin: CodexErrorOrigin::WebSocketHandshake,
+    })?;
+    let pooled = pool_key.and_then(|key| pool_get_for_turn(key, turn_id));
+    let used_pooled = pooled.is_some();
+    let entry = if let Some(entry) = pooled {
+        entry
+    } else {
+        let (stream, _) = connect_with_timeout(&ws_url, headers, connect_timeout_ms).await?;
+        Arc::new(PoolEntry {
+            ws: Arc::new(AsyncMutex::new(stream)),
+            created_at: now_ms(),
+        })
+    };
+    let mut guard = entry.ws.clone().lock_owned().await;
+    if used_pooled {
+        let nonce = b"codex-ready".to_vec();
+        guard
+            .send(Message::Ping(nonce.clone()))
+            .await
+            .map_err(|error| pooled_validation_error(pool_key, error.to_string()))?;
+        let validation = tokio::time::timeout(Duration::from_millis(connect_timeout_ms), async {
+            loop {
+                match guard.next().await {
+                    Some(Ok(Message::Pong(payload))) if payload == nonce => return Ok(()),
+                    Some(Ok(Message::Ping(payload))) => guard
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|error| error.to_string())?,
+                    Some(Ok(_)) => {
+                        return Err("unexpected frame during pooled validation".to_string());
+                    }
+                    Some(Err(error)) => return Err(error.to_string()),
+                    None => return Err("connection closed during pooled validation".to_string()),
+                }
+            }
+        })
+        .await
+        .map_err(|_| pooled_validation_error(pool_key, "validation timeout".to_string()))?;
+        validation.map_err(|error| pooled_validation_error(pool_key, error))?;
+    }
+    Ok(ReadyWebSocket {
+        guard,
+        entry,
+        used_pooled,
+        pool_key: pool_key.map(str::to_string),
+        turn_id,
+        traffic,
+        idle_timeout_ms,
+    })
+}
+
+fn pooled_validation_error(pool_key: Option<&str>, detail: String) -> CodexError {
+    if let Some(key) = pool_key {
+        invalidate_codex_websocket_pool_key(key);
+    }
+    CodexError {
+        status: 0,
+        message: format!("WebSocket pooled connection validation failed: {detail}"),
+        detail: None,
+        retry_after: None,
+        origin: CodexErrorOrigin::WebSocketHandshake,
+    }
+}
+
+pub(super) fn start_codex_websocket_events(
+    ready: ReadyWebSocket,
+    body_value: &serde_json::Value,
+    headers: &HeaderMap,
+    _continuation: Option<&ContinuationCandidate>,
+) -> CodexWebSocketEventReceiver {
+    let body_json = serde_json::to_string(body_value).unwrap_or_default();
+    if let Some(tc) = ready.traffic.as_deref() {
+        tc.write_json("020-upstream-request", body_value);
+        tc.write_json(
+            "021-upstream-request-metadata",
+            &serde_json::json!({
+                "provider": "codex",
+                "transport": "websocket",
+                "headers": headers_to_json(headers),
+                "size": summarize_json_request_size(body_value, &body_json),
+            }),
+        );
+    }
+    let (tx, rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        let ReadyWebSocket {
+            mut guard,
+            entry,
+            used_pooled,
+            pool_key,
+            turn_id,
+            traffic,
+            idle_timeout_ms,
+        } = ready;
+        if let Err(error) = guard.send(Message::Text(body_json)).await {
+            invalidate_pool_owner(pool_key.as_deref(), Some(&entry));
+            let _ = tx
+                .send(Err(CodexError {
+                    status: 0,
+                    message: format!("WebSocket send error: {error}"),
+                    detail: None,
+                    retry_after: None,
+                    origin: CodexErrorOrigin::WebSocket,
+                }))
+                .await;
+            return;
+        }
+        let reusable = stream_ws_events(
+            &mut guard,
+            idle_timeout_ms,
+            pool_key.as_deref(),
+            Some(&entry),
+            traffic,
+            tx,
+        )
+        .await;
+        if let Some(key) = pool_key.as_deref() {
+            if reusable && !used_pooled {
+                pool_insert_for_turn(key.to_string(), entry, turn_id);
+            } else if !reusable {
+                invalidate_pool_entry(key, &entry);
+            }
+        }
+    });
+    rx
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn codex_websocket_event_stream(
     url: &str,
@@ -498,114 +649,22 @@ pub async fn codex_websocket_event_stream(
     idle_timeout_ms: u64,
     continuation: Option<&ContinuationCandidate>,
 ) -> Result<CodexWebSocketEventReceiver, CodexError> {
-    let ws_url = to_websocket_url(url).map_err(|e| CodexError {
-        status: 0,
-        message: e.message,
-        detail: None,
-        retry_after: None,
-        origin: CodexErrorOrigin::WebSocket,
-    })?;
-    let body_json = serde_json::to_string(body_value).unwrap_or_default();
-    if let Some(tc) = traffic.as_deref() {
-        tc.write_json("020-upstream-request", body_value);
-        tc.write_json(
-            "021-upstream-request-metadata",
-            &serde_json::json!({
-                "provider": "codex",
-                "transport": "websocket",
-                "url": ws_url,
-                "method": "GET",
-                "headers": headers_to_json(headers),
-                "size": summarize_json_request_size(body_value, &body_json),
-                "continuation": {
-                    "previousResponseId": continuation
-                        .and_then(|c| c.previous_response_id.as_deref()),
-                    "inputDeltaCount": continuation
-                        .and_then(|c| c.input_delta.as_ref())
-                        .map(|items| items.len()),
-                    "disabledReason": continuation
-                        .and_then(|c| c.disabled_reason.as_deref()),
-                },
-            }),
-        );
-    }
-
-    let pooled = pool_key.and_then(|key| {
-        pool_get_for_turn(key, continuation.and_then(|candidate| candidate.turn_id))
-    });
-    let used_pooled = pooled.is_some();
-    let entry = if let Some(entry) = pooled {
-        entry
-    } else {
-        let (ws_stream, _) = connect_with_timeout(&ws_url, headers, connect_timeout_ms).await?;
-        Arc::new(PoolEntry {
-            ws: Arc::new(AsyncMutex::new(ws_stream)),
-            created_at: now_ms(),
-        })
-    };
-
-    if let Some(tc) = traffic.as_deref() {
-        write_websocket_metadata_capture(tc, &ws_url, pool_key, continuation, used_pooled);
-    }
-
-    let (tx, rx) = mpsc::channel(64);
-    let turn_id = continuation.and_then(|candidate| candidate.turn_id);
-    let pool_key = pool_key.map(str::to_string);
-    let ws = entry.ws.clone();
-    tokio::spawn(async move {
-        let mut ws_guard = ws.lock_owned().await;
-        if used_pooled && ws_guard.send(Message::Ping(vec![])).await.is_err() {
-            if let Some(key) = pool_key.as_deref() {
-                invalidate_pool_entry(key, &entry);
-            }
-            let _ = tx
-                .send(Err(CodexError {
-                    status: 0,
-                    message: "WebSocket send error: failed to ping pooled connection".to_string(),
-                    detail: None,
-                    retry_after: None,
-                    origin: CodexErrorOrigin::WebSocket,
-                }))
-                .await;
-            return;
-        }
-        if let Err(e) = ws_guard.send(Message::Text(body_json)).await {
-            if let Some(key) = pool_key.as_deref() {
-                invalidate_pool_entry(key, &entry);
-            }
-            let _ = tx
-                .send(Err(CodexError {
-                    status: 0,
-                    message: format!("WebSocket send error: {e}"),
-                    detail: None,
-                    retry_after: None,
-                    origin: CodexErrorOrigin::WebSocket,
-                }))
-                .await;
-            return;
-        }
-
-        let reusable = stream_ws_events(
-            &mut ws_guard,
-            idle_timeout_ms,
-            pool_key.as_deref(),
-            Some(&entry),
-            traffic,
-            tx,
-        )
-        .await;
-
-        if let Some(key) = pool_key.as_deref() {
-            if reusable {
-                if !used_pooled {
-                    pool_insert_for_turn(key.to_string(), entry.clone(), turn_id);
-                }
-            } else {
-                invalidate_pool_entry(key, &entry);
-            }
-        }
-    });
-    Ok(rx)
+    let ready = prepare_codex_websocket(
+        url,
+        headers,
+        traffic,
+        pool_key,
+        continuation.and_then(|candidate| candidate.turn_id),
+        connect_timeout_ms,
+        idle_timeout_ms,
+    )
+    .await?;
+    Ok(start_codex_websocket_events(
+        ready,
+        body_value,
+        headers,
+        continuation,
+    ))
 }
 
 fn missing_terminal_error() -> CodexError {
