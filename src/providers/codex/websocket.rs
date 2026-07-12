@@ -1618,6 +1618,33 @@ mod tests {
         ws
     }
 
+    #[test]
+    fn handshake_details_are_structured_sanitized_and_bounded() {
+        let message = format!("safe\n{}", "x".repeat(MAX_HANDSHAKE_ERROR_DETAIL_BYTES * 2));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "error": { "message": message }
+        }))
+        .unwrap();
+        let detail = handshake_error_detail(Some(&body));
+        assert!(!detail.contains('\n'));
+        assert!(detail.len() <= MAX_HANDSHAKE_ERROR_DETAIL_BYTES);
+        assert!(detail.starts_with("safe"));
+    }
+
+    #[test]
+    fn handshake_details_reject_unstructured_and_binary_bodies() {
+        for body in [
+            b"<html>denied</html>".to_vec(),
+            vec![0xff, 0xfe],
+            b"{".to_vec(),
+        ] {
+            assert_eq!(
+                handshake_error_detail(Some(&body)),
+                GENERIC_HANDSHAKE_ERROR_DETAIL
+            );
+        }
+    }
+
     fn create_dummy_stream() -> WebSocketStream<MaybeTlsStream<TcpStream>> {
         // Use a connected TcpStream pair with connect_async which returns
         // WebSocketStream<MaybeTlsStream<TcpStream>>
