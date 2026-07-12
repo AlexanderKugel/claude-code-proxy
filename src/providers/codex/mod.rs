@@ -793,13 +793,7 @@ fn map_codex_error_to_response(err: &client::CodexError) -> Response {
                 response
             }
         }
-        status @ (400..=599)
-            if matches!(
-                err.origin,
-                client::CodexErrorOrigin::BufferedHttp
-                    | client::CodexErrorOrigin::BufferedWebSocket
-            ) =>
-        {
+        status @ (400..=599) => {
             let response = json_error(
                 StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
                 if status == 529 {
