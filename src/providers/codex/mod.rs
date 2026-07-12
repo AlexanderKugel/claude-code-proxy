@@ -1072,6 +1072,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_upstream_status_and_retry_after_are_preserved() {
+        let err = client::CodexError {
+            status: 422,
+            message: "invalid request".to_string(),
+            detail: Some("invalid request".to_string()),
+            retry_after: Some("7".to_string()),
+            origin: client::CodexErrorOrigin::WebSocketHandshake,
+        };
+        let response = map_codex_error_to_response(&err);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response.headers().get(http::header::RETRY_AFTER).unwrap(),
+            "7"
+        );
+    }
+
+    #[tokio::test]
     async fn statusless_codex_error_returns_source_message() {
         let err = client::CodexError {
             status: 0,
