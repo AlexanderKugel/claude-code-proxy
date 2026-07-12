@@ -1384,6 +1384,30 @@ mod tests {
         assert!(!is_previous_response_missing(&unrelated));
     }
 
+    #[tokio::test]
+    async fn pool_checkout_is_exclusive_and_removal_is_identity_safe() {
+        clear_codex_websocket_pool_for_tests();
+        let first = Arc::new(PoolEntry {
+            ws: Arc::new(AsyncMutex::new(create_dummy_stream_async().await)),
+            created_at: now_ms(),
+        });
+        pool_insert("exclusive".to_string(), first.clone());
+        assert!(Arc::ptr_eq(&pool_take("exclusive").unwrap(), &first));
+        assert!(pool_take("exclusive").is_none());
+
+        let replacement = Arc::new(PoolEntry {
+            ws: Arc::new(AsyncMutex::new(create_dummy_stream_async().await)),
+            created_at: now_ms(),
+        });
+        pool_insert("exclusive".to_string(), replacement.clone());
+        pool_remove_entry("exclusive", &first);
+        assert!(Arc::ptr_eq(
+            WS_POOL.lock().unwrap().get("exclusive").unwrap(),
+            &replacement
+        ));
+        clear_codex_websocket_pool_for_tests();
+    }
+
     #[test]
     fn pool_invalidation() {
         clear_codex_websocket_pool_for_tests();
