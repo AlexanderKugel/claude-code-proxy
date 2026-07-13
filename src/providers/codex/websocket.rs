@@ -137,11 +137,16 @@ fn invalidate_pool_owner(pool_key: Option<&str>, entry: Option<&Arc<PoolEntry>>)
     }
 }
 
-fn pool_take_for_turn(key: &str, turn_id: Option<u64>) -> Option<Arc<PoolEntry>> {
+fn pool_get_for_turn(key: &str, turn_id: Option<u64>) -> Option<Arc<PoolEntry>> {
     super::continuation::if_current_turn(Some(key), turn_id, || {
-        WS_POOL.lock().ok()?.remove(key)
+        WS_POOL.lock().ok()?.get(key).cloned()
     })
     .flatten()
+}
+
+fn pool_take_for_turn(key: &str, turn_id: Option<u64>) -> Option<Arc<PoolEntry>> {
+    super::continuation::if_current_turn(Some(key), turn_id, || WS_POOL.lock().ok()?.remove(key))
+        .flatten()
 }
 
 fn pool_insert_for_turn(key: String, entry: Arc<PoolEntry>, turn_id: Option<u64>) {
@@ -1392,8 +1397,11 @@ mod tests {
             created_at: now_ms(),
         });
         pool_insert("exclusive".to_string(), first.clone());
-        assert!(Arc::ptr_eq(&pool_take("exclusive").unwrap(), &first));
-        assert!(pool_take("exclusive").is_none());
+        assert!(Arc::ptr_eq(
+            &WS_POOL.lock().unwrap().remove("exclusive").unwrap(),
+            &first
+        ));
+        assert!(WS_POOL.lock().unwrap().remove("exclusive").is_none());
 
         let replacement = Arc::new(PoolEntry {
             ws: Arc::new(AsyncMutex::new(create_dummy_stream_async().await)),
