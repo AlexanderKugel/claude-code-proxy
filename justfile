@@ -54,6 +54,10 @@ install-dev:
 run *ARGS:
     cargo run -- "$@"
 
+# Build and open the monitor demo in a running CuaBot session
+cua-monitor-demo session:
+    scripts/cua-monitor-demo '{{session}}'
+
 # Internal release helper
 _release bump *ARGS:
     @cargo-release {{bump}} {{ARGS}}
