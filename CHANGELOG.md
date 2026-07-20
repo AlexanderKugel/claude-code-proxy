@@ -1,12 +1,14 @@
 # Changelog
 
-## Unreleased
+## v0.1.22 (2026-07-20)
 
 - Grok accepts request metadata and tool-result references sent by current Claude
   Code versions while continuing to reject malformed and unknown fields.
+  ([#56](https://github.com/raine/claude-code-proxy/pull/56))
 - Gateway model discovery lists every configured provider model and Claude-style
   alias through `GET /v1/models`, making supported aliases available in Claude
-  Code's model picker.
+  Code's model picker. ([#60](https://github.com/raine/claude-code-proxy/issues/60),
+  [#61](https://github.com/raine/claude-code-proxy/pull/61))
 - Codex preserves supported base64 images in tool results while keeping mixed
   text, image, error, and fallback content in its original order.
   ([#59](https://github.com/raine/claude-code-proxy/pull/59))
