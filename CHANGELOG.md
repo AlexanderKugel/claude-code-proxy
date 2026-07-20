@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Grok accepts request metadata and tool-result references sent by current Claude
+  Code versions while continuing to reject malformed and unknown fields.
+- Gateway model discovery lists every configured provider model and Claude-style
+  alias through `GET /v1/models`, making supported aliases available in Claude
+  Code's model picker.
+- Codex preserves supported base64 images in tool results while keeping mixed
+  text, image, error, and fallback content in its original order.
+  ([#59](https://github.com/raine/claude-code-proxy/pull/59))
+- Codex requests continue after the included usage limit when account credits
+  remain available. ([#68](https://github.com/raine/claude-code-proxy/pull/68))
+- Codex compaction requests cap reasoning effort at `low` to reduce latency and
+  reasoning-token usage. `CCP_COMPACT_EFFORT` can choose a different cap or
+  disable the behavior. ([#67](https://github.com/raine/claude-code-proxy/pull/67))
+
 ## v0.1.21 (2026-07-15)
 
 - The monitor shows session token activity trends at common terminal widths,
