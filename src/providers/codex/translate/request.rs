@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -151,13 +152,43 @@ pub enum ResponsesInputItem {
     FunctionCallOutput {
         #[serde(default)]
         call_id: String,
-        output: String,
+        output: ResponsesFunctionCallOutput,
     },
     #[serde(rename = "reasoning")]
     Reasoning {
         id: String,
         summary: Vec<Value>,
         encrypted_content: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ResponsesFunctionCallOutput {
+    Text(String),
+    ContentItems(Vec<ResponsesFunctionCallOutputContentPart>),
+}
+
+impl ResponsesFunctionCallOutput {
+    #[cfg(test)]
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::ContentItems(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponsesFunctionCallOutputContentPart {
+    InputText {
+        text: String,
+    },
+    InputImage {
+        image_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
 }
 
@@ -711,22 +742,25 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
                                     content: std::mem::take(&mut parts),
                                 });
                             }
-                            let body = tool_result_to_string(content);
-                            let output = if is_error.unwrap_or(false) {
-                                format!("[tool execution error]\n{body}")
-                            } else {
-                                body
-                            };
-                            let output =
-                                maybe_append_rewritten_read_offset_note(output, tool_use_id);
-                            let output = maybe_append_read_offset_guidance(
-                                output,
+                            let mut rendered = render_tool_result(content);
+                            if is_error.unwrap_or(false) {
+                                rendered.prepend_text("[tool execution error]".to_string());
+                            }
+                            if let Some(note) =
+                                rewritten_read_offset_note(&rendered.joined_text(), tool_use_id)
+                            {
+                                rendered.push_text(format!("\n{note}"));
+                            }
+                            if should_append_read_offset_guidance(
+                                &rendered.joined_text(),
                                 read_tool_uses_with_offset.contains(tool_use_id),
                                 is_error.unwrap_or(false),
-                            );
+                            ) {
+                                rendered.push_text(format!("\n{}", read_offset_guidance()));
+                            }
                             out.push(ResponsesInputItem::FunctionCallOutput {
                                 call_id: tool_use_id.clone(),
-                                output,
+                                output: function_call_output(rendered),
                             });
                         }
                         _ => {}
@@ -815,14 +849,13 @@ fn is_read_tool_use_with_offset(name: &str, input: &Value) -> bool {
     name == "Read" && input.get("offset").is_some()
 }
 
-fn maybe_append_rewritten_read_offset_note(output: String, tool_use_id: &str) -> String {
+fn rewritten_read_offset_note(output: &str, tool_use_id: &str) -> Option<String> {
     if output.contains("Proxy Read offset note:") {
-        return output;
+        return None;
     }
-    let Some(rewrite) = read_offset_rewrite(tool_use_id) else {
-        return output;
-    };
-    format!("{output}\n\n{}", read_offset_rewrite_note(&rewrite))
+    read_offset_rewrite(tool_use_id)
+        .as_ref()
+        .map(read_offset_rewrite_note)
 }
 
 fn read_offset_rewrite_note(rewrite: &ReadOffsetRewrite) -> String {
@@ -841,19 +874,15 @@ fn read_offset_rewrite_note(rewrite: &ReadOffsetRewrite) -> String {
     )
 }
 
-fn maybe_append_read_offset_guidance(
-    output: String,
+fn should_append_read_offset_guidance(
+    output: &str,
     read_call_had_offset: bool,
     is_error: bool,
-) -> String {
-    if !read_call_had_offset
-        || output.contains("Codex Read guidance:")
-        || !looks_like_read_offset_result(&output)
-        || (!is_error && !looks_like_read_offset_warning(&output))
-    {
-        return output;
-    }
-    format!("{output}\n\n{}", read_offset_guidance())
+) -> bool {
+    read_call_had_offset
+        && !output.contains("Codex Read guidance:")
+        && looks_like_read_offset_result(output)
+        && (is_error || looks_like_read_offset_warning(output))
 }
 
 fn looks_like_read_offset_result(output: &str) -> bool {
@@ -882,57 +911,138 @@ fn read_offset_guidance() -> &'static str {
 // Tool result rendering
 // ---------------------------------------------------------------------------
 
-fn tool_result_to_string(content: &Value) -> String {
-    match content {
-        Value::String(s) => s.clone(),
-        Value::Array(arr) => {
-            let mut parts = Vec::new();
-            for b in arr {
-                match b.get("type").and_then(|v| v.as_str()) {
-                    Some("text") => match b.get("text").and_then(|v| v.as_str()) {
-                        Some(text) => parts.push(text.to_string()),
-                        None => parts.push(unsupported_tool_result_block_to_string(b)),
-                    },
-                    Some("image") => {
-                        if let Some(source) = b.get("source").and_then(|v| v.as_object()) {
-                            match source.get("type").and_then(|v| v.as_str()) {
-                                Some("url")
-                                    if source.get("url").and_then(|v| v.as_str()).is_some() =>
-                                {
-                                    parts.push("[image omitted: url]".to_string());
-                                }
-                                Some("base64")
-                                    if source
-                                        .get("media_type")
-                                        .and_then(|v| v.as_str())
-                                        .is_some()
-                                        && source
-                                            .get("data")
-                                            .and_then(|v| v.as_str())
-                                            .is_some() =>
-                                {
-                                    let media_type = source
-                                        .get("media_type")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("image");
-                                    parts.push(format!("[image omitted: {media_type}]"));
-                                }
-                                _ => parts.push(unsupported_tool_result_block_to_string(b)),
-                            }
-                        } else {
-                            parts.push(unsupported_tool_result_block_to_string(b));
-                        }
-                    }
-                    Some(other) => {
-                        parts.push(format!("[unsupported content block omitted: {other}]"));
-                    }
-                    None => parts.push(unsupported_tool_result_block_to_string(b)),
+enum RenderedToolResultPart {
+    Text(String),
+    Image(String),
+}
+
+struct RenderedToolResult {
+    parts: Vec<RenderedToolResultPart>,
+}
+
+impl RenderedToolResult {
+    fn has_images(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|part| matches!(part, RenderedToolResultPart::Image(_)))
+    }
+
+    fn joined_text(&self) -> String {
+        self.parts
+            .iter()
+            .filter_map(|part| match part {
+                RenderedToolResultPart::Text(text) => Some(text.as_str()),
+                RenderedToolResultPart::Image(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn prepend_text(&mut self, text: String) {
+        self.parts.insert(0, RenderedToolResultPart::Text(text));
+    }
+
+    fn push_text(&mut self, text: String) {
+        self.parts.push(RenderedToolResultPart::Text(text));
+    }
+}
+
+fn render_tool_result(content: &Value) -> RenderedToolResult {
+    let parts = match content {
+        Value::String(text) => vec![RenderedToolResultPart::Text(text.clone())],
+        Value::Array(blocks) => blocks.iter().map(render_tool_result_block).collect(),
+        _ => Vec::new(),
+    };
+    RenderedToolResult { parts }
+}
+
+fn render_tool_result_block(block: &Value) -> RenderedToolResultPart {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| RenderedToolResultPart::Text(text.to_string()))
+            .unwrap_or_else(|| {
+                RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block))
+            }),
+        Some("image") => render_tool_result_image(block),
+        Some(other) => {
+            RenderedToolResultPart::Text(format!("[unsupported content block omitted: {other}]"))
+        }
+        None => RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block)),
+    }
+}
+
+fn render_tool_result_image(block: &Value) -> RenderedToolResultPart {
+    let Some(source) = block.get("source").and_then(Value::as_object) else {
+        return RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block));
+    };
+    match source.get("type").and_then(Value::as_str) {
+        Some("url") if source.get("url").and_then(Value::as_str).is_some() => {
+            RenderedToolResultPart::Text("[image omitted: url]".to_string())
+        }
+        Some("base64") => {
+            let media_type = source.get("media_type").and_then(Value::as_str);
+            let data = source.get("data").and_then(Value::as_str);
+            match media_type
+                .zip(data)
+                .and_then(|(media_type, data)| validated_image_data_url(media_type, data))
+            {
+                Some(image_url) => RenderedToolResultPart::Image(image_url),
+                None => {
+                    RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block))
                 }
             }
-            parts.join("\n")
         }
-        _ => String::new(),
+        _ => RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block)),
     }
+}
+
+fn validated_image_data_url(media_type: &str, data: &str) -> Option<String> {
+    if !matches!(
+        media_type,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+    ) {
+        return None;
+    }
+
+    let compact: String = data
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    if compact.is_empty() {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&compact)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&compact))
+        .ok()?;
+    let canonical = base64::engine::general_purpose::STANDARD.encode(decoded);
+    Some(format!("data:{media_type};base64,{canonical}"))
+}
+
+fn function_call_output(rendered: RenderedToolResult) -> ResponsesFunctionCallOutput {
+    if !rendered.has_images() {
+        return ResponsesFunctionCallOutput::Text(rendered.joined_text());
+    }
+
+    ResponsesFunctionCallOutput::ContentItems(
+        rendered
+            .parts
+            .into_iter()
+            .map(|part| match part {
+                RenderedToolResultPart::Text(text) => {
+                    ResponsesFunctionCallOutputContentPart::InputText { text }
+                }
+                RenderedToolResultPart::Image(image_url) => {
+                    ResponsesFunctionCallOutputContentPart::InputImage {
+                        image_url,
+                        detail: None,
+                    }
+                }
+            })
+            .collect(),
+    )
 }
 
 fn unsupported_tool_result_block_to_string(block: &Value) -> String {
@@ -947,6 +1057,8 @@ fn unsupported_tool_result_block_to_string(block: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    const PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
     fn opts() -> TranslateOptions {
         TranslateOptions {
@@ -1503,8 +1615,9 @@ mod tests {
         .unwrap();
         let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 1);
-        if let ResponsesInputItem::FunctionCallOutput { call_id, .. } = &out.input[0] {
+        if let ResponsesInputItem::FunctionCallOutput { call_id, output } = &out.input[0] {
             assert_eq!(call_id, "tu_1");
+            assert_eq!(output.as_text(), Some("result"));
         } else {
             panic!("expected FunctionCallOutput");
         }
@@ -1533,6 +1646,7 @@ mod tests {
         let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 2);
         if let ResponsesInputItem::FunctionCallOutput { output, .. } = &out.input[1] {
+            let output = output.as_text().expect("text tool output");
             assert!(output.contains("[tool execution error]"));
             assert!(output.contains("File has 331 lines"));
             assert!(output.contains("Codex Read guidance:"));
@@ -1565,7 +1679,10 @@ mod tests {
         let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 2);
         if let ResponsesInputItem::FunctionCallOutput { output, .. } = &out.input[1] {
-            assert_eq!(output, "[tool execution error]\nFile does not exist.");
+            assert_eq!(
+                output.as_text(),
+                Some("[tool execution error]\nFile does not exist.")
+            );
         } else {
             panic!("expected FunctionCallOutput");
         }
@@ -1598,6 +1715,7 @@ mod tests {
         let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 2);
         if let ResponsesInputItem::FunctionCallOutput { output, .. } = &out.input[1] {
+            let output = output.as_text().expect("text tool output");
             assert!(output.contains("1\tcontent"));
             assert!(output.contains("Proxy Read offset note:"));
             assert!(output.contains("1300000"));
@@ -1630,8 +1748,8 @@ mod tests {
         assert_eq!(out.input.len(), 2);
         if let ResponsesInputItem::FunctionCallOutput { output, .. } = &out.input[1] {
             assert_eq!(
-                output,
-                "File has 331 lines, and the requested offset is shown in this fixture."
+                output.as_text(),
+                Some("File has 331 lines, and the requested offset is shown in this fixture.")
             );
         } else {
             panic!("expected FunctionCallOutput");
@@ -1639,19 +1757,154 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_stringifies_images_and_malformed_blocks() {
-        let rendered = tool_result_to_string(&json!([
-            {"type": "text", "text": "caption"},
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
-            {"type": "image", "source": {"type": "url", "url": "https://example.invalid/a.png"}},
+    fn translate_tool_result_preserves_mixed_content_order() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "tu_image",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": PNG_BASE64
+                    }},
+                    {"type": "text", "text": "after"}
+                ]
+            }]}]
+        }))
+        .unwrap();
+
+        let out = translate_request(&req, opts()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&out.input[0]).unwrap(),
+            json!({
+                "type": "function_call_output",
+                "call_id": "tu_image",
+                "output": [
+                    {"type": "input_text", "text": "before"},
+                    {"type": "input_image", "image_url": format!("data:image/png;base64,{PNG_BASE64}")},
+                    {"type": "input_text", "text": "after"}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn translate_tool_result_preserves_image_then_text_order() {
+        let rendered = render_tool_result(&json!([
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": PNG_BASE64
+            }},
+            {"type": "text", "text": "caption"}
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(function_call_output(rendered)).unwrap(),
+            json!([
+                {"type": "input_image", "image_url": format!("data:image/png;base64,{PNG_BASE64}")},
+                {"type": "input_text", "text": "caption"}
+            ])
+        );
+    }
+
+    #[test]
+    fn unsupported_tool_result_images_become_in_place_text_placeholders() {
+        let rendered = render_tool_result(&json!([
+            {"type": "text", "text": "before"},
+            {"type": "image", "source": {
+                "type": "url",
+                "url": "https://example.invalid/a.png"
+            }},
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": "text/plain",
+                "data": "aGVsbG8="
+            }},
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "not base64"
+            }},
+            {"type": "text", "text": "after"}
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(function_call_output(rendered)).unwrap(),
+            json!(
+                "before\n[image omitted: url]\n[unsupported content block omitted: image]\n[unsupported content block omitted: image]\nafter"
+            )
+        );
+    }
+
+    #[test]
+    fn supported_tool_result_image_media_types_pass_validation() {
+        for media_type in ["image/jpeg", "image/png", "image/gif", "image/webp"] {
+            assert_eq!(
+                validated_image_data_url(media_type, "YQ"),
+                Some(format!("data:{media_type};base64,YQ=="))
+            );
+        }
+        assert!(validated_image_data_url("image/svg+xml", "YQ==").is_none());
+        assert!(validated_image_data_url("image/png", "").is_none());
+    }
+
+    #[test]
+    fn text_only_tool_result_keeps_string_wire_format() {
+        let rendered = render_tool_result(&json!([
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"}
+        ]));
+
+        assert_eq!(
+            serde_json::to_value(function_call_output(rendered)).unwrap(),
+            json!("first\nsecond")
+        );
+    }
+
+    #[test]
+    fn tool_result_error_prefix_precedes_image_content() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "tu_error_image",
+                "is_error": true,
+                "content": [{"type": "image", "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": PNG_BASE64
+                }}]
+            }]}]
+        }))
+        .unwrap();
+
+        let out = translate_request(&req, opts()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&out.input[0]).unwrap()["output"],
+            json!([
+                {"type": "input_text", "text": "[tool execution error]"},
+                {"type": "input_image", "image_url": format!("data:image/png;base64,{PNG_BASE64}")}
+            ])
+        );
+    }
+
+    #[test]
+    fn malformed_tool_result_blocks_still_become_text_placeholders() {
+        let rendered = render_tool_result(&json!([
             {"type": "text"},
             {"type": "image"},
             {}
         ]));
+
         assert_eq!(
-            rendered,
-            "caption\n[image omitted: image/png]\n[image omitted: url]\n[unsupported content block omitted: text]\n[unsupported content block omitted: image]\n[unsupported content block omitted: unknown]"
+            rendered.joined_text(),
+            "[unsupported content block omitted: text]\n[unsupported content block omitted: image]\n[unsupported content block omitted: unknown]"
         );
+        assert!(!rendered.has_images());
     }
 
     #[test]

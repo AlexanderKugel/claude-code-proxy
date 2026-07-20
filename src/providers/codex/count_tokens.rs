@@ -1,5 +1,6 @@
 use super::translate::request::{
-    ResponsesContentPart, ResponsesInputItem, ResponsesRequest, ResponsesTool,
+    ResponsesContentPart, ResponsesFunctionCallOutput, ResponsesFunctionCallOutputContentPart,
+    ResponsesInputItem, ResponsesRequest, ResponsesTool,
 };
 
 /// Approximate token counter for Codex translated requests.
@@ -49,10 +50,27 @@ fn count_input_item_tokens(item: &ResponsesInputItem) -> u64 {
         ResponsesInputItem::FunctionCall {
             name, arguments, ..
         } => approx_token_count(name) + approx_token_count(arguments),
-        ResponsesInputItem::FunctionCallOutput { output, .. } => approx_token_count(output),
+        ResponsesInputItem::FunctionCallOutput { output, .. } => {
+            count_function_call_output_tokens(output)
+        }
         ResponsesInputItem::Reasoning {
             encrypted_content, ..
         } => approx_reasoning_token_count(encrypted_content),
+    }
+}
+
+fn count_function_call_output_tokens(output: &ResponsesFunctionCallOutput) -> u64 {
+    match output {
+        ResponsesFunctionCallOutput::Text(text) => approx_token_count(text),
+        ResponsesFunctionCallOutput::ContentItems(content) => content
+            .iter()
+            .map(|part| match part {
+                ResponsesFunctionCallOutputContentPart::InputText { text } => {
+                    approx_token_count(text)
+                }
+                ResponsesFunctionCallOutputContentPart::InputImage { .. } => 2000,
+            })
+            .sum(),
     }
 }
 
@@ -175,6 +193,25 @@ mod tests {
         }))
         .unwrap();
         assert!(count_translated_tokens(&long) >= count_translated_tokens(&short));
+    }
+
+    #[test]
+    fn structured_tool_output_counts_text_and_images() {
+        let text = ResponsesFunctionCallOutput::Text("caption".to_string());
+        let mixed = ResponsesFunctionCallOutput::ContentItems(vec![
+            ResponsesFunctionCallOutputContentPart::InputText {
+                text: "caption".to_string(),
+            },
+            ResponsesFunctionCallOutputContentPart::InputImage {
+                image_url: "data:image/png;base64,YQ==".to_string(),
+                detail: None,
+            },
+        ]);
+
+        assert_eq!(
+            count_function_call_output_tokens(&mixed),
+            count_function_call_output_tokens(&text) + 2000
+        );
     }
 
     #[test]
