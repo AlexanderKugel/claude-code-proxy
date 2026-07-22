@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.23 (2026-07-22)
+
+- Codex WebSocket streaming handles pooled connections and HTTP fallback more
+  reliably, preventing concurrent requests from blocking each other or sending
+  the same request twice.
+- Codex errors preserve upstream status codes and optional retry timing, with
+  clearer permission failures and safer WebSocket handshake diagnostics.
+- Codex streaming limits oversized events and error responses, preventing
+  malformed or stalled upstream responses from consuming unbounded memory.
+
 ## v0.1.22 (2026-07-20)
 
 - Grok accepts request metadata and tool-result references sent by current Claude
