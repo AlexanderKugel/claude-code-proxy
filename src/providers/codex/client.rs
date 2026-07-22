@@ -121,6 +121,10 @@ pub fn build_codex_headers(
         "openai-beta",
         header_value("openai-beta", "responses=experimental")?,
     );
+    headers.insert(
+        "x-codex-beta-features",
+        header_value("x-codex-beta-features", "remote_compaction_v2")?,
+    );
     if use_responses_lite {
         headers.insert(
             "x-openai-internal-codex-responses-lite",
@@ -1701,6 +1705,10 @@ mod tests {
             "responses=experimental"
         );
         assert_eq!(headers.get("session_id").unwrap(), "s");
+        assert_eq!(
+            headers.get("x-codex-beta-features").unwrap(),
+            "remote_compaction_v2"
+        );
     }
 
     #[test]

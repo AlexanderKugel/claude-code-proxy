@@ -283,6 +283,48 @@ so simple prompts can emit no thinking block. Set `codex.reasoningSummary` /
 `CCP_CODEX_REASONING_SUMMARY` to `off` or `none` to suppress summaries while
 keeping `reasoning.effort` and encrypted continuation content.
 
+#### Server compaction
+
+Codex server compaction is disabled by default. Enable it for the proxy process
+with either configuration form:
+
+```json
+{
+  "codex": {
+    "serverCompaction": true
+  }
+}
+```
+
+```sh
+CCP_CODEX_SERVER_COMPACTION=1 claude-code-proxy serve
+```
+
+When Claude Code reaches a manual or automatic compaction boundary, the proxy:
+
+1. Sends the translated Codex conversation with a trailing
+   `compaction_trigger`. The request uses the selected Responses lane and omits
+   Claude Code's summarization instruction.
+2. Stores the encrypted `compaction` item returned by Codex in memory for the
+   matching Claude Code session and model.
+3. Allows Claude Code's normal portable summary request to complete and uses
+   that summary as an exact replay anchor.
+4. Replaces the anchored portable summary on subsequent Codex turns with recent
+   retained messages, the encrypted compaction item, and messages added after
+   the boundary.
+
+This gives Codex its native compacted conversation while preserving Claude
+Code's portable summary as a fallback. Replay requires append-only history in
+the same session and model. A branch, proxy restart, provider or model change,
+malformed response, upstream failure, expired state, or memory limit uses the
+portable history instead. Compaction state remains in memory for up to 30
+minutes.
+
+The boundary performs one additional Codex request, so `/compact` can take
+longer. Structured log events named `server_compaction_triggered`,
+`server_compaction_completed`, and `server_compaction_failed` expose each
+attempt and outcome.
+
 Claude Code's hosted `web_search_20250305` tool is translated to Codex's native
 Responses `web_search` tool with live external web access and non-empty native
 domain filters. Forced searches use Codex's required `allowed_tools` form so
@@ -692,7 +734,8 @@ Windows, and at
     "serviceTier": "fast",
     "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
     "transport": "websocket",
-    "previousResponseId": false
+    "previousResponseId": false,
+    "serverCompaction": true
   },
   "kimi": {
     "userAgent": "KimiCLI/1.37.0",
@@ -734,6 +777,7 @@ Windows, and at
 | `CCP_CODEX_BASE_URL`             | `codex.baseUrl`            | `https://chatgpt.com/backend-api/codex/responses` | Override the Codex Responses endpoint                                                                                                                                             |
 | `CCP_CODEX_TRANSPORT`            | `codex.transport`          | `websocket`                                       | Codex transport: `websocket`, `http`, or `auto`                                                                                                                                   |
 | `CCP_CODEX_PREVIOUS_RESPONSE_ID` | `codex.previousResponseId` | `false`                                           | Enable WebSocket continuation with `previous_response_id` when the request is append-only                                                                                         |
+| `CCP_CODEX_SERVER_COMPACTION`     | `codex.serverCompaction`   | `false`                                           | Enable Codex remote compaction at Claude Code compaction boundaries with `1`, `true`, `yes`, or `on`                                                                              |
 | `CCP_CODEX_ORIGINATOR`           | `codex.originator`         | `claude-code-proxy`                               | Override the `originator` header sent to Codex                                                                                                                                    |
 | `CCP_CODEX_USER_AGENT`           | `codex.userAgent`          | `claude-code-proxy/<version>`                     | Override the `User-Agent` header sent to Codex                                                                                                                                    |
 | `CCP_KIMI_USER_AGENT`            | `kimi.userAgent`           | `KimiCLI/1.37.0`                                  | Override the `User-Agent` header sent to Kimi                                                                                                                                     |

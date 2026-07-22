@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Codex optionally preserves conversation continuity across Claude Code
+  compaction boundaries with native encrypted compaction artifacts. Enable it
+  with `codex.serverCompaction` or `CCP_CODEX_SERVER_COMPACTION`.
+
 ## v0.1.23 (2026-07-22)
 
 - Codex WebSocket streaming handles pooled connections and HTTP fallback more

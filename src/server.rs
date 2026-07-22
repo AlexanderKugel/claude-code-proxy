@@ -411,6 +411,13 @@ async fn dispatch_request(
         }
     };
 
+    if !count_tokens
+        && provider.name() != "codex"
+        && let Some(session_id) = session_id.as_deref()
+    {
+        crate::providers::codex::clear_session_compaction(session_id);
+    }
+
     let effort = crate::providers::translate_shared::read_effort(&body)
         .ok()
         .flatten()

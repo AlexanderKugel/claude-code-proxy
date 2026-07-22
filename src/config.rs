@@ -54,6 +54,8 @@ struct CodexConfig {
     pub user_agent: Option<String>,
     #[serde(rename = "previousResponseId")]
     pub previous_response_id: Option<bool>,
+    #[serde(rename = "serverCompaction")]
+    pub server_compaction: Option<bool>,
     #[serde(rename = "serviceTier")]
     pub service_tier: Option<String>,
     #[serde(rename = "reasoningSummary")]
@@ -244,6 +246,9 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     {
         out.push("CCP_CODEX_REASONING_SUMMARY (env)".to_string());
     }
+    if env.contains_key("CCP_CODEX_SERVER_COMPACTION") {
+        out.push("CCP_CODEX_SERVER_COMPACTION (env)".to_string());
+    }
     if let Some(file_cfg) = file {
         if let Some(bind_address) = file_cfg.bind_address {
             out.push(format!("bindAddress: {bind_address}"));
@@ -262,11 +267,16 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
                 out.push(format!("log.stderr: {v}"));
             }
         }
-        if let Some(codex) = file_cfg.codex
-            && let Some(summary) = codex.reasoning_summary
-            && !summary.is_empty()
-        {
-            out.push("codex.reasoningSummary (config)".to_string());
+        if let Some(codex) = file_cfg.codex {
+            if codex
+                .reasoning_summary
+                .is_some_and(|value| !value.is_empty())
+            {
+                out.push("codex.reasoningSummary (config)".to_string());
+            }
+            if let Some(enabled) = codex.server_compaction {
+                out.push(format!("codex.serverCompaction: {enabled}"));
+            }
         }
     }
     out
@@ -416,6 +426,25 @@ pub fn codex_previous_response_id() -> bool {
         && let Some(val) = codex.previous_response_id
     {
         return val;
+    }
+    false
+}
+
+pub fn codex_server_compaction() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_SERVER_COMPACTION") {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {}
+        }
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(enabled) = codex.server_compaction
+    {
+        return enabled;
     }
     false
 }
@@ -592,6 +621,7 @@ mod tests {
             std::env::remove_var("CCP_LOG_VERBOSE");
             std::env::remove_var("CCP_LOG_STDERR");
             std::env::remove_var("CCP_CODEX_REASONING_SUMMARY");
+            std::env::remove_var("CCP_CODEX_SERVER_COMPACTION");
         }
     }
 
@@ -781,5 +811,27 @@ mod tests {
             let _summary_env = EnvGuard::set("CCP_CODEX_REASONING_SUMMARY", "");
             assert_eq!(codex_reasoning_summary().as_deref(), Some("off"));
         }
+    }
+
+    #[test]
+    fn codex_server_compaction_defaults_and_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+
+        assert!(!codex_server_compaction());
+        {
+            let _enabled_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "on");
+            assert!(codex_server_compaction());
+        }
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"serverCompaction":true}}"#,
+        )
+        .unwrap();
+        assert!(codex_server_compaction());
+        let _disabled_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "false");
+        assert!(!codex_server_compaction());
     }
 }
