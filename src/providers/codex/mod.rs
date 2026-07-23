@@ -157,6 +157,9 @@ impl Provider for CodexProvider {
                 translated.input.len(),
                 None,
             );
+            if let Some(monitor) = ctx.monitor.as_ref() {
+                monitor.compaction_started(&ctx.req_id);
+            }
             let mut compaction_ctx = ctx.clone();
             compaction_ctx.monitor = None;
             match request_compaction(self.client.as_ref(), &translated, &compaction_ctx).await {
