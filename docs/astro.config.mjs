@@ -11,6 +11,15 @@ export default defineConfig({
       description: 'Run Claude Code with Codex, Kimi, Grok, or Cursor Agent.',
       plugins: [starlightLlmsTxt()],
       favicon: '/favicon.svg',
+      head: [
+        {
+          tag: 'script',
+          attrs: {
+            src: '/image-zoom.js',
+            defer: true,
+          },
+        },
+      ],
       social: [
         {
           icon: 'github',

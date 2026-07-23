@@ -5,7 +5,7 @@ description: Use the claude-code-proxy monitor to inspect sessions, active and r
 
 `claude-code-proxy serve` opens the monitor when stdout is an interactive terminal. The same process runs the HTTP listener.
 
-![claude-code-proxy monitor and Claude Code session](/claude-code-screenshot.webp)
+![claude-code-proxy monitor showing sessions, active requests, recent requests, and events](/monitor-tui.webp)
 
 ## What the monitor shows
 
