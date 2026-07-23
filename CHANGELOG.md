@@ -5,6 +5,10 @@
 - Codex optionally preserves conversation continuity across Claude Code
   compaction boundaries with native encrypted compaction artifacts. Enable it
   with `codex.serverCompaction` or `CCP_CODEX_SERVER_COMPACTION`.
+- Native OpenAI Responses clients can use `POST /v1/responses` with existing
+  Codex authentication, including JSON responses, SSE streaming, and automatic
+  token refresh. Enable the endpoint with `codex.responsesApi` or
+  `CCP_CODEX_RESPONSES_API=1`; it is disabled by default.
 
 ## v0.1.23 (2026-07-22)
 

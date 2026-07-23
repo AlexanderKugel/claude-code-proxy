@@ -706,6 +706,9 @@ The proxy speaks enough of the Anthropic API for Claude Code:
 - `POST /v1/messages?beta=true`: same (Claude Code always sends `?beta=true`)
 - `POST /v1/messages/count_tokens`: local token count via `gpt-tokenizer`
   (o200k_base); used by Claude Code's compaction logic
+- `POST /v1/responses`: optional native OpenAI Responses passthrough using stored
+  Codex authentication; enable with `codex.responsesApi` or
+  `CCP_CODEX_RESPONSES_API=1`
 - `GET /healthz`: liveness check
 
 ## Configuration
@@ -735,7 +738,8 @@ Windows, and at
     "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
     "transport": "websocket",
     "previousResponseId": false,
-    "serverCompaction": true
+    "serverCompaction": true,
+    "responsesApi": false
   },
   "kimi": {
     "userAgent": "KimiCLI/1.37.0",
@@ -778,6 +782,7 @@ Windows, and at
 | `CCP_CODEX_TRANSPORT`            | `codex.transport`          | `websocket`                                       | Codex transport: `websocket`, `http`, or `auto`                                                                                                                                   |
 | `CCP_CODEX_PREVIOUS_RESPONSE_ID` | `codex.previousResponseId` | `false`                                           | Enable WebSocket continuation with `previous_response_id` when the request is append-only                                                                                         |
 | `CCP_CODEX_SERVER_COMPACTION`     | `codex.serverCompaction`   | `false`                                           | Enable Codex remote compaction at Claude Code compaction boundaries with `1`, `true`, `yes`, or `on`                                                                              |
+| `CCP_CODEX_RESPONSES_API`         | `codex.responsesApi`       | `false`                                           | Enable `POST /v1/responses` with native OpenAI Responses request, JSON response, and SSE behavior using stored Codex authentication                                               |
 | `CCP_CODEX_ORIGINATOR`           | `codex.originator`         | `claude-code-proxy`                               | Override the `originator` header sent to Codex                                                                                                                                    |
 | `CCP_CODEX_USER_AGENT`           | `codex.userAgent`          | `claude-code-proxy/<version>`                     | Override the `User-Agent` header sent to Codex                                                                                                                                    |
 | `CCP_KIMI_USER_AGENT`            | `kimi.userAgent`           | `KimiCLI/1.37.0`                                  | Override the `User-Agent` header sent to Kimi                                                                                                                                     |
@@ -793,6 +798,14 @@ Windows, and at
 A malformed `config.json` is reported on stderr and ignored; defaults are used
 in its place. Invalid types for individual keys are warned and skipped without
 affecting other keys.
+
+`CCP_CODEX_RESPONSES_API=1` enables `POST /v1/responses` for clients that use
+OpenAI's native Responses protocol. The route replaces incoming credentials with
+the proxy's stored Codex authentication, refreshes rejected access tokens before
+forwarding a response, and preserves native JSON or SSE response bodies. The
+route accepts Codex models listed by `claude-code-proxy models`; Images API,
+stored response retrieval and deletion, and WebSocket ingress are outside its
+scope.
 
 Codex uses the WebSocket Responses transport by default. Set
 `CCP_CODEX_TRANSPORT=http` to use the older HTTP SSE transport for debugging or

@@ -56,6 +56,8 @@ struct CodexConfig {
     pub previous_response_id: Option<bool>,
     #[serde(rename = "serverCompaction")]
     pub server_compaction: Option<bool>,
+    #[serde(rename = "responsesApi")]
+    pub responses_api: Option<bool>,
     #[serde(rename = "serviceTier")]
     pub service_tier: Option<String>,
     #[serde(rename = "reasoningSummary")]
@@ -219,6 +221,9 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     if env.contains_key("CCP_LOG_STDERR") {
         out.push("log.stderr (env)".to_string());
     }
+    if env.contains_key("CCP_CODEX_RESPONSES_API") {
+        out.push("codex.responsesApi (env)".to_string());
+    }
     if env.contains_key("CCP_KIMI_OAUTH_HOST") {
         out.push("kimi.oauthHost (env)".to_string());
     }
@@ -276,6 +281,9 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
             }
             if let Some(enabled) = codex.server_compaction {
                 out.push(format!("codex.serverCompaction: {enabled}"));
+            }
+            if codex.responses_api == Some(true) {
+                out.push("codex.responsesApi: true".to_string());
             }
         }
     }
@@ -443,6 +451,21 @@ pub fn codex_server_compaction() -> bool {
     if let Some(file) = read_file_config(&config_dir)
         && let Some(codex) = file.codex
         && let Some(enabled) = codex.server_compaction
+    {
+        return enabled;
+    }
+    false
+}
+
+pub fn codex_responses_api() -> bool {
+    let env: HashMap<_, _> = std::env::vars().collect();
+    if let Some(raw) = env.get("CCP_CODEX_RESPONSES_API") {
+        return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+    }
+    let config_dir = paths::config_dir();
+    if let Some(file) = read_file_config(&config_dir)
+        && let Some(codex) = file.codex
+        && let Some(enabled) = codex.responses_api
     {
         return enabled;
     }
@@ -622,6 +645,7 @@ mod tests {
             std::env::remove_var("CCP_LOG_STDERR");
             std::env::remove_var("CCP_CODEX_REASONING_SUMMARY");
             std::env::remove_var("CCP_CODEX_SERVER_COMPACTION");
+            std::env::remove_var("CCP_CODEX_RESPONSES_API");
         }
     }
 
@@ -775,6 +799,46 @@ mod tests {
         let loaded = load_config();
         assert!(loaded.log_verbose);
         assert!(loaded.log_stderr);
+    }
+
+    #[test]
+    fn codex_responses_api_defaults_to_disabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+
+        assert!(!codex_responses_api());
+    }
+
+    #[test]
+    fn codex_responses_api_reads_config_and_env_takes_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"codex":{"responsesApi":true}}"#,
+        )
+        .unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+
+        assert!(codex_responses_api());
+        let _responses_env = EnvGuard::set("CCP_CODEX_RESPONSES_API", "false");
+        assert!(!codex_responses_api());
+    }
+
+    #[test]
+    fn codex_responses_api_accepts_enabled_env_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+
+        for value in ["1", "true", "TRUE", "yes"] {
+            let _responses_env = EnvGuard::set("CCP_CODEX_RESPONSES_API", value);
+            assert!(codex_responses_api(), "{value}");
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub const SESSION_TOKEN_BUCKET_SECS: u64 = 10;
 pub enum EndpointKind {
     Messages,
     CountTokens,
+    Responses,
 }
 
 impl EndpointKind {
@@ -23,6 +24,7 @@ impl EndpointKind {
         match self {
             Self::Messages => "messages",
             Self::CountTokens => "count_tokens",
+            Self::Responses => "responses",
         }
     }
 }

@@ -4,6 +4,7 @@ pub mod compaction;
 pub mod continuation;
 pub mod count_tokens;
 pub(crate) mod events;
+pub mod native;
 pub mod request_summary;
 pub mod translate;
 pub mod websocket;

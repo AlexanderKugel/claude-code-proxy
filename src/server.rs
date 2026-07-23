@@ -4,6 +4,9 @@ use crate::{
     monitor::{EndpointKind, MonitorHandle},
     project,
     provider::RequestContext,
+    providers::codex::native::{
+        CodexNativeBackend, NativeResponseOutcome, openai_error, validate_native_request_model,
+    },
     registry::{Registry, normalize_incoming_model},
     session::{self, SessionState},
     traffic::{TrafficCaptureOptions, create_traffic_capture},
@@ -96,24 +99,42 @@ pub async fn serve_listener(
 }
 
 pub fn app(registry: Arc<Registry>) -> Router {
-    app_with_monitor(registry, None)
+    app_with_options(registry, None, crate::config::codex_responses_api())
 }
 
 pub fn app_with_monitor(registry: Arc<Registry>, monitor: Option<MonitorHandle>) -> Router {
-    let state = Arc::new(AppState { registry, monitor });
-    Router::new()
+    app_with_options(registry, monitor, crate::config::codex_responses_api())
+}
+
+pub fn app_with_options(
+    registry: Arc<Registry>,
+    monitor: Option<MonitorHandle>,
+    responses_api: bool,
+) -> Router {
+    let native_responses = responses_api.then(|| Arc::new(CodexNativeBackend::new()));
+    let state = Arc::new(AppState {
+        registry,
+        monitor,
+        native_responses,
+    });
+    let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/messages", post(handler_messages))
         .route("/v1/messages/count_tokens", post(handler_count_tokens))
-        .route("/v1/models", get(handler_models))
-        .fallback(fallback_handler)
-        .with_state(state)
+        .route("/v1/models", get(handler_models));
+    let router = if responses_api {
+        router.route("/v1/responses", post(handler_responses))
+    } else {
+        router
+    };
+    router.fallback(fallback_handler).with_state(state)
 }
 
 #[derive(Clone)]
 struct AppState {
     registry: Arc<Registry>,
     monitor: Option<MonitorHandle>,
+    native_responses: Option<Arc<CodexNativeBackend>>,
 }
 
 async fn healthz() -> Json<serde_json::Value> {
@@ -164,6 +185,203 @@ async fn handler_messages(State(state): State<Arc<AppState>>, req: Request<Body>
 
 async fn handler_count_tokens(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
     dispatch_request(state, req, true).await
+}
+
+async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
+    let started_at = Instant::now();
+    let log = create_logger("server");
+    let req_id = Uuid::new_v4().to_string();
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let headers = req.headers().clone();
+    let path = uri.path().to_string();
+    let query = redacted_query(&uri);
+    log.info(
+        "request",
+        Some(serde_json::Map::from_iter([
+            ("reqId".to_string(), json!(&req_id)),
+            ("method".to_string(), json!(method.as_str())),
+            ("path".to_string(), json!(&path)),
+            ("query".to_string(), json!(&query)),
+        ])),
+    );
+
+    let session_id = native_session_id(&headers);
+    if let Some(monitor) = state.monitor.as_ref() {
+        monitor.request_started(&req_id, session_id.clone(), None, EndpointKind::Responses);
+    }
+    let request_guard = RequestMonitorGuard::new(state.monitor.clone(), req_id.clone());
+    let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let response = openai_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!("Invalid JSON: {error}"),
+                None,
+                Some("invalid_json"),
+            );
+            log_native_request_completed(&log, &req_id, None, response.status(), started_at);
+            return monitor_response_body(response, request_guard);
+        }
+    };
+    let body: Value = match parse_native_json_body(&body_bytes) {
+        Ok(body) => body,
+        Err(response) => {
+            log_native_request_completed(&log, &req_id, None, response.status(), started_at);
+            return monitor_response_body(response, request_guard);
+        }
+    };
+    if let Err(response) = validate_native_request_model(&body) {
+        log_native_request_completed(&log, &req_id, None, response.status(), started_at);
+        return monitor_response_body(response, request_guard);
+    }
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(normalize_incoming_model);
+    let effort = body
+        .pointer("/reasoning/effort")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let now = current_millis();
+    let session_state = if let Some(session_id) = session_id.as_deref() {
+        session::existing_session(Some(session_id), now)
+    } else {
+        None
+    };
+    let current = model.as_deref().and_then(|model| {
+        session::record_session_request(
+            session_id.as_deref(),
+            session_state.as_ref(),
+            "codex",
+            model,
+            now,
+        )
+    });
+    if let Some(monitor) = state.monitor.as_ref() {
+        if let Some(current) = current.as_ref() {
+            monitor.session_sequence_resolved(&req_id, current.seq);
+        }
+        if let Some(model) = model.as_deref() {
+            monitor.provider_selected(&req_id, "codex", model, effort);
+        }
+    }
+
+    let traffic = create_traffic_capture(TrafficCaptureOptions {
+        req_id: req_id.clone(),
+        session_id: session_id.clone(),
+        session_seq: current.as_ref().map(|state| state.seq),
+        provider: Some("codex".to_string()),
+        state_dir_override: None,
+    })
+    .map(Arc::new);
+    if let Some(capture) = traffic.as_ref() {
+        if let Some(monitor) = state.monitor.as_ref() {
+            monitor.traffic_capture_path(&req_id, capture.root().to_path_buf());
+        }
+        capture.write_json(
+            "000-metadata",
+            &json!({
+                "reqId": &req_id,
+                "sessionId": &session_id,
+                "sessionSeq": current.as_ref().map(|state| state.seq),
+                "kind": "responses",
+                "provider": "codex",
+                "model": &model,
+                "method": method.as_str(),
+                "path": &path,
+                "query": &query,
+                "headers": headers_to_record(&headers),
+            }),
+        );
+        capture.write_json("010-openai-responses-request", &body);
+    }
+
+    let context = RequestContext {
+        req_id: req_id.clone(),
+        session_id,
+        session_seq: current.map(|state| state.seq),
+        provider: "codex".to_string(),
+        traffic,
+        monitor: state.monitor.clone(),
+    };
+    let response = match state.native_responses.as_ref() {
+        Some(backend) => backend.handle(body, context).await,
+        None => openai_error(
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            "Native Responses API is disabled",
+            None,
+            None,
+        ),
+    };
+    log_native_request_completed(
+        &log,
+        &req_id,
+        model.as_deref(),
+        response.status(),
+        started_at,
+    );
+    monitor_response_body(response, request_guard)
+}
+
+fn native_session_id(headers: &http::HeaderMap) -> Option<String> {
+    [
+        "x-claude-code-session-id",
+        "session_id",
+        "x-client-request-id",
+    ]
+    .into_iter()
+    .find_map(|name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn parse_native_json_body(body: &[u8]) -> Result<Value, Response> {
+    if body.is_empty() {
+        return Err(openai_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "Invalid JSON: empty body",
+            None,
+            Some("invalid_json"),
+        ));
+    }
+    serde_json::from_slice(body).map_err(|error| {
+        openai_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            format!("Invalid JSON: {error}"),
+            None,
+            Some("invalid_json"),
+        )
+    })
+}
+
+fn log_native_request_completed(
+    log: &Logger,
+    req_id: &str,
+    model: Option<&str>,
+    status: StatusCode,
+    started_at: Instant,
+) {
+    log.info(
+        "request_completed",
+        Some(serde_json::Map::from_iter([
+            ("reqId".to_string(), json!(req_id)),
+            ("endpoint".to_string(), json!("responses")),
+            ("provider".to_string(), json!("codex")),
+            ("model".to_string(), json!(model)),
+            ("countTokens".to_string(), json!(false)),
+            ("status".to_string(), json!(status.as_u16())),
+            ("ms".to_string(), json!(started_at.elapsed().as_millis())),
+        ])),
+    );
 }
 
 async fn dispatch_request(
@@ -532,21 +750,34 @@ async fn dispatch_request(
 
 fn monitor_response_body(response: Response, guard: RequestMonitorGuard) -> Response {
     let status = response.status();
+    let outcome = response
+        .extensions()
+        .get::<NativeResponseOutcome>()
+        .cloned();
     let (parts, body) = response.into_parts();
-    let stream =
-        futures_util::stream::unfold((body, guard), move |(mut body, mut guard)| async move {
+    let stream = futures_util::stream::unfold(
+        (body, guard, outcome),
+        move |(mut body, mut guard, outcome)| async move {
             match body.frame().await {
-                Some(Ok(frame)) => Some((Ok(frame), (body, guard))),
+                Some(Ok(frame)) => Some((Ok(frame), (body, guard, outcome))),
                 Some(Err(err)) => {
                     guard.failed(status, err.to_string());
-                    Some((Err(err), (body, guard)))
+                    Some((Err(err), (body, guard, outcome)))
                 }
                 None => {
-                    guard.completed(status);
+                    if let Some(message) = outcome.as_ref().and_then(NativeResponseOutcome::failure)
+                    {
+                        guard.failed(status, message);
+                    } else if status.is_success() {
+                        guard.completed(status);
+                    } else {
+                        guard.failed(status, format!("HTTP {}", status.as_u16()));
+                    }
                     None
                 }
             }
-        });
+        },
+    );
     Response::from_parts(parts, Body::new(StreamBody::new(stream)))
 }
 
