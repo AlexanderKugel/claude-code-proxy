@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.24 (2026-07-23)
 
 - Codex optionally preserves conversation continuity across Claude Code
   compaction boundaries with native encrypted compaction artifacts. Enable it
