@@ -342,6 +342,7 @@ fn native_session_id(headers: &http::HeaderMap) -> Option<String> {
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_native_json_body(body: &[u8]) -> Result<Value, Response> {
     if body.is_empty() {
         return Err(openai_error(

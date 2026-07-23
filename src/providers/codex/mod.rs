@@ -690,6 +690,7 @@ fn empty_live_stream_response() -> Response {
     event_stream_response(futures_util::stream::empty::<Result<Bytes, std::io::Error>>())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn remaining_live_stream_response(
     mut upstream_events: websocket::CodexWebSocketEventReceiver,
     mut translator: LiveStreamTranslator,

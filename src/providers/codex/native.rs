@@ -69,6 +69,7 @@ struct NativeResolved {
     stream: bool,
 }
 
+#[allow(clippy::result_large_err)]
 pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
     let object = body.as_object().ok_or_else(|| {
         openai_error(
@@ -110,6 +111,7 @@ pub fn validate_native_request_model(body: &Value) -> Result<String, Response> {
     Ok(requested)
 }
 
+#[allow(clippy::result_large_err)]
 fn shape_native_request(body: &mut Value) -> Result<NativeResolved, Response> {
     let requested = validate_native_request_model(body)?;
     let object = body
