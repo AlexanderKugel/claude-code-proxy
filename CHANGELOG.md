@@ -1,4 +1,7 @@
-# Changelog
+---
+title: Changelog
+description: Release notes for claude-code-proxy.
+---
 
 ## Unreleased
 
