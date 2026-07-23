@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
-    "build": "astro build",
+    "build": "astro build && cp dist/llms-full.txt dist/llms.txt",
     "preview": "astro preview",
     "astro": "astro"
   },
