@@ -3,10 +3,16 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
-## Unreleased
+## v0.1.25 (2026-07-24)
 
+- Kimi users can select Kimi K3 with the `kimi-k3` or `k3` model name, including
+  its one-million-token context window and `max` reasoning effort.
+  ([#79](https://github.com/raine/claude-code-proxy/pull/79))
 - The monitor shows active native Codex compaction requests with a dedicated
   `compacting` status.
+- The new [documentation site](https://claude-code-proxy.raine.dev) provides
+  setup guides, provider details, configuration references, troubleshooting,
+  and an `llms.txt` version for coding agents.
 
 ## v0.1.24 (2026-07-23)
 
