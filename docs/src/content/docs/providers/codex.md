@@ -49,15 +49,45 @@ WebSocket is the default transport. Set `CCP_CODEX_TRANSPORT=http` for HTTP SSE,
 
 ## Server compaction
 
-Codex server compaction is opt-in:
+Claude Code normally compacts a long conversation by asking the active model to write a portable text summary. Later turns contain that summary instead of the original transcript. This works across providers, but a prose summary can flatten details from a long, tool-heavy Codex session.
+
+Codex server compaction preserves the same boundary in a model-native form. Codex returns an opaque encrypted `compaction` item representing the earlier Responses history. On later turns, the proxy gives that item back to Codex together with selected recent messages and everything added after the boundary. Claude Code still receives its normal portable summary, so the session has a safe fallback.
+
+This is most useful for long coding sessions where continuity after `/compact` or automatic compaction matters. It does not increase the model's context window or prevent Claude Code from compacting. The boundary also takes longer because it adds one Codex request.
+
+### How it works
+
+1. Claude Code reaches a manual or automatic compaction boundary.
+2. The proxy sends the translated conversation to Codex with a trailing `compaction_trigger`.
+3. Codex returns an encrypted `compaction` item, which the proxy keeps in memory for that Claude Code session and model.
+4. Claude Code completes its normal summary request. The proxy uses the resulting summary as an exact anchor.
+5. On subsequent matching turns, the proxy replaces the portable summary with the encrypted item, retained recent context, and post-compaction messages.
+
+The encrypted item remains opaque to the proxy. It is stored only in memory and sent back to Codex as native Responses input.
+
+### Enable server compaction
+
+Server compaction is disabled by default. Enable it in `config.json`:
+
+```json
+{
+  "codex": {
+    "serverCompaction": true
+  }
+}
+```
+
+Or enable it for one proxy process:
 
 ```sh
 CCP_CODEX_SERVER_COMPACTION=1 claude-code-proxy serve
 ```
 
-At a Claude Code compaction boundary, the proxy requests native Codex compaction, keeps the encrypted item in memory for the matching session and model, and anchors replay to Claude Code's portable summary. Branches, restarts, model changes, malformed responses, expiry, or memory limits fall back to portable history. State can remain in memory for up to 30 minutes.
+### Fallbacks and visibility
 
-The boundary adds one Codex request. Structured events named `server_compaction_triggered`, `server_compaction_completed`, and `server_compaction_failed` report its outcome.
+Replay requires the same Claude Code session and Codex model with append-only history. A branch, proxy restart, provider or model change, malformed response, upstream failure, memory limit, or 30 minutes without matching activity discards the native state and uses Claude Code's portable summary instead.
+
+While the native request is active, the monitor shows `compacting`. Structured log events named `server_compaction_triggered`, `server_compaction_completed`, and `server_compaction_failed` report each attempt and outcome.
 
 ## Native Responses API
 
