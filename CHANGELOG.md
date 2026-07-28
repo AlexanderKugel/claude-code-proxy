@@ -5,9 +5,27 @@ description: Release notes for claude-code-proxy.
 
 ## Unreleased
 
+## v0.1.26 (2026-07-28)
+
+- Standard OpenAI clients can use Codex through the optional
+  `POST /v1/chat/completions` endpoint, with streaming, reasoning effort, and
+  structured output support.
+- Cursor Agent works with current client versions and restores text, thinking,
+  usage, model mode, and fast-mode handling.
+- Claude Code's `claude-opus-5` model name routes correctly through Codex and
+  Kimi.
+- Claude Code's automatic security-review classifier can use a dedicated model
+  configured with `CCP_AUTO_REVIEW_MODEL` or `autoReviewModel`.
+  ([#72](https://github.com/raine/claude-code-proxy/pull/72))
+- Codex retries empty successful completions and returns a clear error if no
+  usable response arrives. ([#70](https://github.com/raine/claude-code-proxy/pull/70),
+  [#71](https://github.com/raine/claude-code-proxy/pull/71))
 - Grok handles images in user messages and tool results without failing requests.
   Images are omitted by default, with opt-in vision through
   `CCP_GROK_TOOL_IMAGE`. Traffic captures redact image payloads.
+  ([#69](https://github.com/raine/claude-code-proxy/pull/69))
+- Nix builds use vendored dependencies for reproducible sandboxed builds.
+  ([#80](https://github.com/raine/claude-code-proxy/pull/80))
 
 ## v0.1.25 (2026-07-24)
 
