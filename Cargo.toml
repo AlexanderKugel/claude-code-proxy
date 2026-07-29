@@ -1,6 +1,6 @@
 [package]
 name = "claude-code-proxy"
-version = "0.1.26"
+version = "0.1.27"
 description = "Anthropic-compatible proxy for Claude Code provider backends"
 edition = "2024"
 authors = ["Claude Code Proxy contributors"]

@@ -3,11 +3,16 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
-## Unreleased
+## v0.1.27 (2026-07-29)
 
+- Grok streams remain reliable during long responses, keepalive events, and
+  output-token truncation instead of failing after partial output.
+- Forced Codex web searches keep the selected model, so Luna searches no longer
+  switch to Sol, while preserving domain filters and search usage reporting.
+  ([#53](https://github.com/raine/claude-code-proxy/pull/53))
 - Codex WebSocket connections honor `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
-  and `NO_PROXY`, restoring standard non-TUN HTTP proxy support for both plain
-  WebSocket Upgrade requests and WSS CONNECT tunnels.
+  and `NO_PROXY`, restoring standard non-TUN HTTP proxy support.
+  ([#83](https://github.com/raine/claude-code-proxy/pull/83))
 
 ## v0.1.26 (2026-07-28)
 
