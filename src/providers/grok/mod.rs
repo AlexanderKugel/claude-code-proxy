@@ -353,6 +353,13 @@ where
 
     fn fail_at(&mut self, stage: &str, kind: &str) -> Vec<u8> {
         self.error_sent = true;
+        let mut fields = serde_json::Map::new();
+        fields.insert("reqId".into(), serde_json::json!(self.req_id));
+        fields.insert("stage".into(), serde_json::json!(stage));
+        fields.insert("kind".into(), serde_json::json!(kind));
+        fields.insert("bytes".into(), serde_json::json!(self.bytes));
+        fields.insert("chunks".into(), serde_json::json!(self.chunks));
+        crate::logging::create_logger("grok").warn("grok_stream_failed", Some(fields));
         if let Some(capture) = self.stream_capture.as_mut() {
             capture.malformed(stage, kind);
             capture.downstream_event("error", serde_json::json!({"type":"error","error":{"type":"api_error","message":"Grok stream is invalid"}}));
@@ -625,6 +632,32 @@ mod tests {
                 .expect("downstream EOF waited for upstream EOF")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn data_less_upstream_frame_does_not_interrupt_stream() {
+        let upstream = futures_util::stream::iter(vec![
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"first\"}\n\n",
+            )),
+            Ok(Bytes::from_static(b": keepalive\n\n")),
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n",
+            )),
+        ]);
+        let response = stream_body(
+            upstream,
+            "msg_1".into(),
+            "grok-4.5".into(),
+            None,
+            "req_1".into(),
+            None,
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("first"));
+        assert!(body.contains("event: message_stop"));
+        assert!(!body.contains("event: error"));
     }
 
     #[tokio::test]
