@@ -3,11 +3,14 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
-## Unreleased
+## v0.1.28 (2026-07-29)
 
-- Optional Codex Images API routes reuse the existing ChatGPT OAuth session for
-  `gpt-image-2` generation and JSON or multipart image edits, with strict size,
-  concurrency, upstream-host, header, and diagnostic privacy boundaries.
+- OpenAI-compatible clients can generate and edit images with `gpt-image-2`
+  through optional Codex Images API routes using the existing ChatGPT sign-in.
+  ([#85](https://github.com/raine/claude-code-proxy/pull/85))
+- Codex streams show estimated input usage from the start and exact usage at
+  completion, keeping Claude Code's live token counters useful.
+  ([#86](https://github.com/raine/claude-code-proxy/pull/86))
 
 ## v0.1.27 (2026-07-29)
 
