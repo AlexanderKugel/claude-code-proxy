@@ -3,7 +3,7 @@ title: Models and routing
 description: Understand provider model patterns, aliases, Codex fast mode, context hints, small models, model listing, and Claude Code gateway discovery.
 ---
 
-The model ID in each request selects its provider. One proxy listener can serve every provider.
+The model ID in each request selects its provider. One proxy listener can serve every provider through Anthropic Messages and the enabled OpenAI-compatible routes.
 
 ## Routing patterns
 

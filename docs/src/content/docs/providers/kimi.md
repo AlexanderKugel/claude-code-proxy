@@ -37,6 +37,10 @@ Claude Code's `/effort` setting maps to Kimi `reasoning_effort` at `low`, `mediu
 - Images inside tool results map to `image_url` parts in tool messages.
 - Supported video input maps to Kimi video content.
 
+## OpenAI-compatible APIs
+
+When the OpenAI routes are enabled, Kimi model IDs work on both `POST /v1/chat/completions` and `POST /v1/responses`. The proxy validates the OpenAI request, translates it to Kimi's native Chat Completions protocol, and maps the buffered provider stream into buffered or streaming OpenAI output. Text, supported images, reasoning effort, function tools, tool calls, tool results, token limits, and usage are supported within the shared adapter's documented field subset.
+
 ## Configuration
 
 `CCP_KIMI_BASE_URL`, `CCP_KIMI_OAUTH_HOST`, and `CCP_KIMI_USER_AGENT` provide explicit endpoint and client overrides. `CCP_USER_AGENT` is the fallback user-agent override. These settings are intended for compatibility and controlled debugging. See [Configuration](/reference/configuration/) for defaults and file keys.
