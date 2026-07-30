@@ -52,7 +52,7 @@ Claude Code's `/effort` selects matching Cursor catalog variants when available.
 
 ## OpenAI-compatible APIs
 
-When the OpenAI routes are enabled, Cursor model IDs and prefixes work on both `POST /v1/chat/completions` and `POST /v1/responses`. The shared adapter maps OpenAI input into Cursor's prompt and selected-image protocol, then converts Cursor events into buffered or streaming OpenAI output. The `Read`, `Write`, and `Bash` bridge requires `stream: true`, matching function definitions, and a stable `x-claude-code-session-id`, `session_id`, or `x-client-request-id` header. Other function names are rejected when tool bridging is requested.
+When the OpenAI routes are enabled, Cursor models work with both `POST /v1/chat/completions` and `POST /v1/responses`. To use the `Read`, `Write`, or `Bash` tool bridge, send `stream: true`, define the matching function tools, and include a stable session header. The proxy accepts `x-claude-code-session-id`, `session_id`, or `x-client-request-id`. Other function names are not supported by the Cursor bridge.
 
 ## Session continuation
 

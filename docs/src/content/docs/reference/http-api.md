@@ -1,9 +1,9 @@
 ---
 title: HTTP API
-description: Canonical local HTTP routes for liveness, Anthropic Messages, token counting, model discovery, routed OpenAI APIs, and Codex images.
+description: Local routes for health checks, Anthropic Messages, token counts, model discovery, OpenAI-compatible requests, and Codex images.
 ---
 
-The server speaks the Anthropic and OpenAI protocol subsets needed by Claude Code and Codex-backed OpenAI-compatible clients.
+The server exposes the Anthropic and OpenAI routes supported by the proxy. Each route uses the stored login for the model's provider.
 
 <div class="security-callout">
 <strong>No client authentication.</strong> The listener accepts requests without validating `Authorization` or `x-api-key`. Loopback is the default. Protect every non-loopback listener with a firewall or authenticating reverse proxy.
@@ -64,32 +64,28 @@ Claude Code gateway discovery filters IDs according to its own model rules. See 
 
 ## `POST /v1/chat/completions`
 
-This route exists when `CCP_CODEX_RESPONSES_API=1` or `codex.responsesApi` is true. Despite the setting name, the request `model` can select Codex, Kimi, Grok, or Cursor Agent. Incoming bearer credentials are accepted for client compatibility and replaced with the selected provider's proxy-owned authentication.
+Enable this route with `CCP_CODEX_RESPONSES_API=1` or `codex.responsesApi: true`. The `model` field selects Codex, Kimi, Grok, or Cursor. The proxy ignores incoming bearer credentials and uses the stored login for that provider.
 
-Codex keeps its dedicated Chat Completions translator and supports:
+```sh
+curl http://127.0.0.1:18765/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"kimi-k2.6","messages":[{"role":"user","content":"Hello"}]}'
+```
 
-- text messages with `system`, `developer`, `user`, and `assistant` roles
-- streaming and buffered responses
-- `reasoning_effort` values `none`, `low`, `medium`, `high`, `xhigh`, and `max`
-- `response_format` values `text`, `json_object`, and strict `json_schema`
-- `stream_options.include_usage`
-- `temperature` and `top_p` on models that use the full Responses lane
-- `user` as a Responses safety identifier
-
-Omitted Codex reasoning effort defaults to `medium`. `CCP_CODEX_EFFORT` or `codex.effort` takes precedence over the request. Every translated Codex request uses `store: false`, upstream streaming, and `reasoning.context: "all_turns"`.
-
-Kimi, Grok, and Cursor use the shared OpenAI compatibility adapter. It supports:
+For Kimi, Grok, and Cursor, the route accepts:
 
 - `system`, `developer`, `user`, `assistant`, and `tool` messages
-- text, supported user images, assistant function calls, and tool results
-- function tools and named, automatic, required, or disabled tool choice
+- text, supported user images, function calls, and tool results
+- function tools and `tool_choice`
 - `max_tokens` or `max_completion_tokens`
 - `reasoning_effort`
-- streaming, buffered responses, and `stream_options.include_usage`
+- streaming, non-streaming responses, and `stream_options.include_usage`
 
-A buffered response uses the standard `chat.completion` object. A streaming response emits `chat.completion.chunk` events and ends with `data: [DONE]`. Tool-call indexes are contiguous even when provider reasoning or text blocks precede them. Grok citations appear as Chat Completions annotations.
+Codex uses its own compatibility path. It supports text messages, `reasoning_effort`, `response_format`, `stream_options.include_usage`, `temperature`, `top_p`, and `user`. Reasoning effort defaults to `medium`, and the proxy-wide Codex effort setting takes precedence. Function calls, images, audio, log probabilities, multiple choices, storage, and output token limits are not supported on the Codex Chat Completions path.
 
-The adapter validates each provider's capabilities before making an upstream request. Unsupported non-null fields return an OpenAI `invalid_request_error` with `error.code` set to `unsupported_parameter` and the field in `error.param`. Supported fields differ between the dedicated Codex translator and the shared provider adapter. Cursor's `Read`, `Write`, and `Bash` tool bridge requires `stream: true` and a stable session header.
+Non-streaming requests return a `chat.completion` object. Streaming requests return `chat.completion.chunk` events followed by `data: [DONE]`. Grok citations are included in message annotations.
+
+Unsupported non-null fields return `invalid_request_error` with the field named in `error.param`. Cursor tools are limited to `Read`, `Write`, and `Bash`. They require `stream: true` and a stable session header.
 
 ## `POST /v1/images/generations`
 
@@ -120,33 +116,42 @@ The Images API is an internal ChatGPT Codex integration, not the public OpenAI P
 
 ## `POST /v1/responses`
 
-This route exists when `CCP_CODEX_RESPONSES_API=1` or `codex.responsesApi` is true. The request `model` selects Codex, Kimi, Grok, or Cursor Agent through the same registry used by `/v1/messages` and `/v1/chat/completions`.
+Enable this route with `CCP_CODEX_RESPONSES_API=1` or `codex.responsesApi: true`. The `model` field selects Codex, Kimi, Grok, or Cursor.
 
-Registered Codex models use native Responses passthrough. The proxy validates the Codex model, replaces incoming auth with proxy-owned ChatGPT Codex auth, refreshes rejected access tokens, and preserves native JSON responses and SSE bodies.
+```sh
+curl http://127.0.0.1:18765/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"grok-4.5","input":"Hello"}'
+```
 
-Kimi, Grok, and Cursor use the shared OpenAI compatibility adapter. It accepts:
+Codex models use native Responses passthrough, including native JSON and SSE output. For Kimi, Grok, and Cursor, the route accepts:
 
-- string input or message input items
+- string input or message items
 - `instructions`
-- function calls and function-call outputs
-- function tools and tool choice
+- function calls, function-call outputs, tools, and `tool_choice`
 - `max_output_tokens`
 - `reasoning.effort`
-- streaming or buffered output
+- streaming or non-streaming output
 
-The adapter maps provider text, reasoning, function calls, usage, finish status, and errors into Responses objects and lifecycle events. Grok hosted search emits `web_search_call` output items, and Grok citations use Responses URL citation annotations. Responses echo the accepted tool list and tool choice. A provider `max_tokens` stop produces an incomplete response with reason `max_output_tokens`.
+Responses include the accepted tool settings. Grok search appears as a `web_search_call`, with sources in URL citation annotations. When a provider reaches its output token limit, the response status is `incomplete` and the reason is `max_output_tokens`.
 
-`store: true` and unsupported non-null fields are rejected rather than ignored. Stored response retrieval or deletion and WebSocket client ingress are not implemented.
+`store: true` and other unsupported non-null fields return an error. Stored response retrieval, deletion, and WebSocket client connections are not supported.
 
 ## OpenAI routing, sessions, and errors
 
-Both OpenAI creation routes normalize a trailing `[1m]`, resolve configured model aliases, and select the provider from the model ID. Unknown IDs return HTTP 400 with the supported catalog. Aliases follow `aliasProvider`, while explicit provider IDs keep their provider.
+Both OpenAI routes strip a trailing `[1m]`, resolve configured aliases, and choose the provider from `model`. Aliases follow `aliasProvider`, while explicit provider model IDs keep their provider. Unknown models return HTTP 400 with the supported model list.
 
-The first non-empty `x-claude-code-session-id`, `session_id`, or `x-client-request-id` header supplies session identity. Stable session identity is required for Cursor tool bridging and supports provider affinity where applicable. Shared OpenAI request validation completes before session state changes.
+For requests that need a stable session, set one of these headers:
 
-Authentication, permission, rate-limit, invalid-request, and provider API failures use OpenAI error envelopes. Rate-limit responses preserve `Retry-After`. Malformed provider streams and provider response-size violations return gateway errors rather than blaming the client.
+- `x-claude-code-session-id`
+- `session_id`
+- `x-client-request-id`
 
-The monitor and structured logs record the selected provider and resolved model. Optional traffic capture records the OpenAI request, translated Anthropic request, provider request and response where available, intermediate Anthropic SSE, and bounded downstream OpenAI output. Traffic artifacts preserve prompts and tool content.
+The proxy uses the first non-empty value. Cursor tool calls require a stable session. Session affinity also applies to providers that support it.
+
+Authentication, permission, rate-limit, invalid-request, and provider failures use the OpenAI error format. Rate-limit responses keep the provider's `Retry-After` header. Malformed or oversized provider streams return a gateway error.
+
+The monitor and logs show the selected provider and model. Traffic capture records request and response data for debugging, including prompts and tool content, so treat the capture directory as sensitive.
 
 ## Other routes
 

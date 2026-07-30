@@ -39,7 +39,7 @@ Claude Code's `/effort` setting maps to Kimi `reasoning_effort` at `low`, `mediu
 
 ## OpenAI-compatible APIs
 
-When the OpenAI routes are enabled, Kimi model IDs work on both `POST /v1/chat/completions` and `POST /v1/responses`. The proxy validates the OpenAI request, translates it to Kimi's native Chat Completions protocol, and maps the buffered provider stream into buffered or streaming OpenAI output. Text, supported images, reasoning effort, function tools, tool calls, tool results, token limits, and usage are supported within the shared adapter's documented field subset.
+When the OpenAI routes are enabled, Kimi models work with both `POST /v1/chat/completions` and `POST /v1/responses`. You can use text, supported images, reasoning effort, function tools, tool results, token limits, streaming, and usage reporting. See [HTTP API](/reference/http-api/) for the accepted request fields.
 
 ## Configuration
 

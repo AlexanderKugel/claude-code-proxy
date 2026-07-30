@@ -3,7 +3,7 @@ title: How it works
 description: Follow authentication, routing, protocol translation, streaming, session state, and diagnostics through claude-code-proxy.
 ---
 
-claude-code-proxy exposes Anthropic Messages and optional OpenAI-compatible creation APIs. Every route selects a provider from the request model and translates through that provider's native protocol.
+claude-code-proxy exposes Anthropic Messages and optional OpenAI-compatible routes. Every route selects a provider from the request model and translates through that provider's native protocol.
 
 <div class="route-rail" aria-label="claude-code-proxy request architecture">
   <div class="route-node"><strong>API client</strong><span>Anthropic Messages<br/>OpenAI Chat or Responses</span></div>
@@ -13,7 +13,7 @@ claude-code-proxy exposes Anthropic Messages and optional OpenAI-compatible crea
   <div class="route-node provider-stack"><code>Codex Responses</code><code>Kimi Chat Completions</code><code>Grok Responses</code><code>Cursor Connect</code></div>
 </div>
 
-## Request lifecycle
+## Anthropic requests
 
 1. Claude Code sends an Anthropic Messages request to `/v1/messages`.
 2. The registry normalizes a trailing `[1m]`, resolves aliases, and selects a provider from the model ID.
@@ -23,13 +23,11 @@ claude-code-proxy exposes Anthropic Messages and optional OpenAI-compatible crea
 6. The proxy emits Anthropic SSE events or accumulates a non-streaming Anthropic response.
 7. The monitor, JSONL logger, and optional traffic capture record operational details.
 
-## OpenAI-compatible lifecycle
+## OpenAI-compatible requests
 
-`POST /v1/chat/completions` and `POST /v1/responses` use the same model registry as Anthropic Messages. Codex retains dedicated paths: Responses requests pass through natively, while Chat Completions uses the Codex compatibility translator.
+Enable the OpenAI routes to use `/v1/chat/completions` or `/v1/responses`. The `model` field chooses Codex, Kimi, Grok, or Cursor in the same way it does on `/v1/messages`.
 
-Kimi, Grok, and Cursor requests pass through a strict OpenAI ingress adapter into an Anthropic Messages request. The selected provider returns typed buffered or live Anthropic SSE. One egress adapter decodes those events into the requested OpenAI surface, which keeps buffered and streaming text, reasoning, tools, usage, citations, completion status, and errors aligned.
-
-This shared intermediate stream avoids decoding an already-built HTTP response. It also gives monitoring and traffic capture named stages for the OpenAI request, translated request, provider traffic, intermediate events, and downstream output.
+Codex Responses requests go directly to the native Codex API. The proxy translates other OpenAI requests to the selected provider and returns either Chat Completions or Responses output. Streaming and non-streaming requests use the same translation rules, and unsupported fields return an error instead of being ignored.
 
 ## Authentication boundary
 

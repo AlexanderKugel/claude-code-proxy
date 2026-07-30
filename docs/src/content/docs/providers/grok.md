@@ -44,7 +44,7 @@ Claude Code hosted search tools map to Grok-native tools:
 
 ## OpenAI-compatible APIs
 
-When the OpenAI routes are enabled, Grok model IDs work on both `POST /v1/chat/completions` and `POST /v1/responses`. Grok retains live upstream streaming through the shared adapter. Text, reasoning, function tools, tool calls, tool results, token limits, usage, and errors map to the selected OpenAI surface. Responses output includes native `web_search_call` items and flat URL citation annotations. Chat Completions output includes citation annotations without a hosted-search output item.
+When the OpenAI routes are enabled, Grok models work with both `POST /v1/chat/completions` and `POST /v1/responses`. Text, reasoning, function tools, tool results, token limits, streaming, usage, and errors use the standard shape for the chosen route. Responses requests also return Grok searches as `web_search_call` items. Citations are available on both routes.
 
 ## Multimodal support
 

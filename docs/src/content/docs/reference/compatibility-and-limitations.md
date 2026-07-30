@@ -31,12 +31,11 @@ claude-code-proxy targets Claude Code's practical Anthropic API usage rather tha
 
 ## OpenAI API scope
 
-- `/v1/chat/completions` and `/v1/responses` are enabled together by the Codex Responses API setting, but route Codex, Kimi, Grok, and Cursor models.
-- Codex Responses requests preserve the provider's native Responses payload. Other providers use the shared strict compatibility adapter.
-- The shared adapter rejects unsupported non-null request fields instead of silently discarding them.
-- Chat Completions and Responses support streaming and buffered output, usage, reasoning, function tools, tool results, provider errors, aliases, and `[1m]` normalization within the documented field subset.
-- Grok hosted search has a native Responses representation. Chat Completions exposes returned citations but has no standard hosted-search output item.
-- Cursor OpenAI tool bridging is limited to `Read`, `Write`, and `Bash`, and requires streaming plus stable session identity.
+- `CCP_CODEX_RESPONSES_API=1` enables `/v1/chat/completions` and `/v1/responses` for Codex, Kimi, Grok, and Cursor models.
+- Codex Responses requests use native passthrough. Requests for the other providers support text, reasoning, function tools, tool results, token limits, usage, streaming, aliases, and `[1m]` model hints.
+- Unsupported non-null request fields return an error instead of being ignored.
+- Grok search calls appear as Responses `web_search_call` items. Chat Completions returns the citations without a separate search item.
+- Cursor tool bridging supports `Read`, `Write`, and `Bash`. It requires streaming and a stable session ID.
 - Stored Responses operations, WebSocket ingress, multiple choices, audio, log probabilities, and arbitrary hosted tools are unsupported.
 
 ## Models and context
