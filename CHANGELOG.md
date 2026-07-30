@@ -3,6 +3,12 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
+## v0.1.29 (2026-07-30)
+
+- Codex honors required, disabled, and single-tool choices from Claude Code, and
+  disables parallel tool calls when requested.
+  ([#89](https://github.com/raine/claude-code-proxy/pull/89))
+
 ## v0.1.28 (2026-07-29)
 
 - OpenAI-compatible clients can generate and edit images with `gpt-image-2`
