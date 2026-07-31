@@ -11,7 +11,7 @@ LLM docs: <https://claude-code-proxy.raine.dev/llms.txt>
 
 > [!TIP]
 > I'm building [aven](https://github.com/raine/aven), a local-first task manager
-> for power users and agents who live in the terminal.
+> for power users and agents.
 
 ## Why?
 
