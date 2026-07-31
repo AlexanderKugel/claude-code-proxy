@@ -3,6 +3,13 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
+## Unreleased
+
+- Codex users can transcribe audio through the optional OpenAI-compatible
+  `POST /v1/audio/transcriptions` endpoint using the existing Codex sign-in.
+  Enable it with `codex.transcriptionsApi` or
+  `CCP_CODEX_TRANSCRIPTIONS_API=1`.
+
 ## v0.1.29 (2026-07-30)
 
 - Codex honors required, disabled, and single-tool choices from Claude Code, and
