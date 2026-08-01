@@ -38,8 +38,8 @@ use self::auth::manager::CodexAuthManager;
 use self::auth::token_store::file_store;
 use self::client::CodexHttpClient;
 use self::compaction::{
-    abort_compaction_attempt, activate_compaction, apply_compaction_replay, request_compaction,
-    store_compaction,
+    CompactionAttempt, abort_compaction_attempt, activate_compaction, apply_compaction_replay,
+    begin_compaction, request_compaction, store_compaction,
 };
 use self::continuation::{
     ContinuationCandidate, abort_continuation, continuation_candidate, record_continuation,
@@ -232,6 +232,7 @@ impl Provider for CodexProvider {
 
         let compact_boundary = is_compact_messages_request(&body);
         let server_compaction_enabled = config::codex_server_compaction();
+        let mut compaction_attempt = None;
         if !server_compaction_enabled && let Some(session_id) = ctx.session_id.as_deref() {
             compaction::clear_compaction(session_id);
         }
@@ -239,7 +240,8 @@ impl Provider for CodexProvider {
             && compact_boundary
             && let Some(session_id) = ctx.session_id.as_deref()
         {
-            compaction::clear_compaction(session_id);
+            let attempt = begin_compaction(session_id, &translated.model);
+            compaction_attempt = Some(attempt);
             log_compaction_event(
                 "server_compaction_triggered",
                 &ctx,
@@ -253,7 +255,7 @@ impl Provider for CodexProvider {
             compaction_ctx.monitor = None;
             match request_compaction(self.client.as_ref(), &translated, &compaction_ctx).await {
                 Ok(native_history) => {
-                    if store_compaction(session_id, &translated.model, native_history) {
+                    if store_compaction(session_id, attempt, native_history) {
                         log_compaction_event(
                             "server_compaction_completed",
                             &ctx,
@@ -265,12 +267,12 @@ impl Provider for CodexProvider {
                             "server_compaction_failed",
                             &ctx,
                             translated.input.len(),
-                            Some("compaction state exceeded the in-memory limit"),
+                            Some("compaction state was superseded or exceeded the in-memory limit"),
                         );
                     }
                 }
                 Err(error) => {
-                    compaction::clear_compaction(session_id);
+                    abort_compaction_attempt(Some(session_id), Some(attempt));
                     log_compaction_event(
                         "server_compaction_failed",
                         &ctx,
@@ -283,7 +285,8 @@ impl Provider for CodexProvider {
             && !compact_boundary
             && let Some(replay) = apply_compaction_replay(ctx.session_id.as_deref(), &translated)
         {
-            translated = replay;
+            translated = replay.request;
+            compaction_attempt = Some(replay.attempt);
         }
 
         // Check continuation
@@ -309,7 +312,10 @@ impl Provider for CodexProvider {
                 ctx,
                 stream_request,
                 continuation,
-                compact_boundary,
+                LiveStreamCompaction {
+                    compact_boundary,
+                    attempt: compaction_attempt,
+                },
             )
             .await;
         }
@@ -323,11 +329,7 @@ impl Provider for CodexProvider {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    abort_compaction_attempt(
-                        ctx.session_id.as_deref(),
-                        compact_boundary,
-                        &translated,
-                    );
+                    abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
                     abort_continuation(ctx.session_id.as_deref(), turn_id);
                     return map_codex_error_to_response(&e);
                 }
@@ -340,13 +342,13 @@ impl Provider for CodexProvider {
             let error = empty_buffered_completion_error();
             drop_live_continuation_for_retry(&mut continuation);
             if attempt >= MAX_EMPTY_COMPLETION_RETRIES {
-                abort_compaction_attempt(ctx.session_id.as_deref(), compact_boundary, &translated);
+                abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
                 abort_continuation(ctx.session_id.as_deref(), turn_id);
                 return map_codex_error_to_response(&error);
             }
             let delay = compute_backoff_delay(attempt, None);
             if delay.exceeds_budget {
-                abort_compaction_attempt(ctx.session_id.as_deref(), compact_boundary, &translated);
+                abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
                 abort_continuation(ctx.session_id.as_deref(), turn_id);
                 return map_codex_error_to_response(&error);
             }
@@ -365,11 +367,7 @@ impl Provider for CodexProvider {
             ) {
                 Ok(b) => b,
                 Err(e) => {
-                    abort_compaction_attempt(
-                        ctx.session_id.as_deref(),
-                        compact_boundary,
-                        &translated,
-                    );
+                    abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
                     abort_continuation(ctx.session_id.as_deref(), turn_id);
                     return map_codex_failure_to_response(&format!(
                         "Stream translation error: {e}"
@@ -389,6 +387,7 @@ impl Provider for CodexProvider {
             update_continuation_from_upstream(
                 ctx.session_id.as_deref(),
                 turn_id,
+                compaction_attempt,
                 &translated,
                 &upstream.body,
                 compact_boundary,
@@ -419,6 +418,7 @@ impl Provider for CodexProvider {
                     update_continuation_from_upstream(
                         ctx.session_id.as_deref(),
                         turn_id,
+                        compaction_attempt,
                         &translated,
                         &upstream.body,
                         compact_boundary,
@@ -426,11 +426,7 @@ impl Provider for CodexProvider {
                     (StatusCode::OK, Json(json)).into_response()
                 }
                 Err(e) => {
-                    abort_compaction_attempt(
-                        ctx.session_id.as_deref(),
-                        compact_boundary,
-                        &translated,
-                    );
+                    abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
                     abort_continuation(ctx.session_id.as_deref(), turn_id);
                     map_codex_failure_to_response(&format!("Accumulation error: {e}"))
                 }
@@ -526,16 +522,21 @@ fn log_compaction_event(
 fn abort_request_state(
     session_id: Option<&str>,
     turn_id: Option<u64>,
-    compact_boundary: bool,
-    request: &translate::request::ResponsesRequest,
+    compaction_attempt: Option<CompactionAttempt>,
 ) {
-    abort_compaction_attempt(session_id, compact_boundary, request);
+    abort_compaction_attempt(session_id, compaction_attempt);
     abort_continuation(session_id, turn_id);
 }
 
 enum LiveStreamStart {
     Response(Response),
     Retry { error: client::CodexError },
+}
+
+#[derive(Clone, Copy)]
+struct LiveStreamCompaction {
+    compact_boundary: bool,
+    attempt: Option<CompactionAttempt>,
 }
 
 async fn live_stream_response(
@@ -545,7 +546,7 @@ async fn live_stream_response(
     ctx: RequestContext,
     request_body: translate::request::ResponsesRequest,
     continuation: ContinuationCandidate,
-    compact_boundary: bool,
+    compaction: LiveStreamCompaction,
 ) -> Response {
     let model = model.to_string();
     let turn_id = continuation.turn_id;
@@ -565,22 +566,12 @@ async fn live_stream_response(
                     continue;
                 }
                 if attempt >= MAX_RETRYABLE_LIVE_STREAM_RETRIES {
-                    abort_request_state(
-                        ctx.session_id.as_deref(),
-                        turn_id,
-                        compact_boundary,
-                        &request_body,
-                    );
+                    abort_request_state(ctx.session_id.as_deref(), turn_id, compaction.attempt);
                     return map_codex_error_to_response(&err);
                 }
                 let delay = compute_backoff_delay(attempt, err.retry_after.as_deref());
                 if delay.exceeds_budget {
-                    abort_request_state(
-                        ctx.session_id.as_deref(),
-                        turn_id,
-                        compact_boundary,
-                        &request_body,
-                    );
+                    abort_request_state(ctx.session_id.as_deref(), turn_id, compaction.attempt);
                     return map_codex_error_to_response(&err);
                 }
                 attempt += 1;
@@ -588,12 +579,7 @@ async fn live_stream_response(
                 continue;
             }
             Err(err) => {
-                abort_request_state(
-                    ctx.session_id.as_deref(),
-                    turn_id,
-                    compact_boundary,
-                    &request_body,
-                );
+                abort_request_state(ctx.session_id.as_deref(), turn_id, compaction.attempt);
                 return map_codex_error_to_response(&err);
             }
         };
@@ -605,7 +591,7 @@ async fn live_stream_response(
             ctx.clone(),
             turn_id,
             request_body.clone(),
-            compact_boundary,
+            compaction,
         )
         .await
         {
@@ -617,22 +603,12 @@ async fn live_stream_response(
                     continue;
                 }
                 if attempt >= MAX_RETRYABLE_LIVE_STREAM_RETRIES {
-                    abort_request_state(
-                        ctx.session_id.as_deref(),
-                        turn_id,
-                        compact_boundary,
-                        &request_body,
-                    );
+                    abort_request_state(ctx.session_id.as_deref(), turn_id, compaction.attempt);
                     return map_codex_error_to_response(&error);
                 }
                 let delay = compute_backoff_delay(attempt, error.retry_after.as_deref());
                 if delay.exceeds_budget {
-                    abort_request_state(
-                        ctx.session_id.as_deref(),
-                        turn_id,
-                        compact_boundary,
-                        &request_body,
-                    );
+                    abort_request_state(ctx.session_id.as_deref(), turn_id, compaction.attempt);
                     return map_codex_error_to_response(&error);
                 }
                 attempt += 1;
@@ -649,7 +625,7 @@ async fn live_stream_response_once(
     ctx: RequestContext,
     turn_id: Option<u64>,
     request_body: translate::request::ResponsesRequest,
-    compact_boundary: bool,
+    compaction: LiveStreamCompaction,
 ) -> LiveStreamStart {
     let estimated_input_tokens = count_translated_tokens(&request_body);
     let mut translator = LiveStreamTranslator::with_estimated_input_tokens(
@@ -670,12 +646,7 @@ async fn live_stream_response_once(
                 if retryable_live_start_codex_error(&err) {
                     return LiveStreamStart::Retry { error: err };
                 }
-                abort_request_state(
-                    ctx.session_id.as_deref(),
-                    turn_id,
-                    compact_boundary,
-                    &request_body,
-                );
+                abort_request_state(ctx.session_id.as_deref(), turn_id, compaction.attempt);
                 return LiveStreamStart::Response(map_codex_error_to_response(&err));
             }
         };
@@ -723,12 +694,7 @@ async fn live_stream_response_once(
                         },
                     };
                 }
-                abort_request_state(
-                    ctx.session_id.as_deref(),
-                    turn_id,
-                    compact_boundary,
-                    &request_body,
-                );
+                abort_request_state(ctx.session_id.as_deref(), turn_id, compaction.attempt);
                 return LiveStreamStart::Response(map_codex_failure_to_response(&message));
             }
         };
@@ -748,9 +714,10 @@ async fn live_stream_response_once(
                 update_continuation_from_upstream(
                     ctx.session_id.as_deref(),
                     turn_id,
+                    compaction.attempt,
                     &request_body,
                     &upstream_sse_body,
-                    compact_boundary,
+                    compaction.compact_boundary,
                 );
                 return LiveStreamStart::Response(single_live_stream_response(pending_chunk));
             }
@@ -762,16 +729,17 @@ async fn live_stream_response_once(
                 turn_id,
                 request_body,
                 upstream_sse_body,
-                compact_boundary,
+                compaction,
             ));
         }
         if terminal {
             update_continuation_from_upstream(
                 ctx.session_id.as_deref(),
                 turn_id,
+                compaction.attempt,
                 &request_body,
                 &upstream_sse_body,
-                compact_boundary,
+                compaction.compact_boundary,
             );
             if pending_chunk.is_empty() {
                 return LiveStreamStart::Response(empty_live_stream_response());
@@ -870,17 +838,12 @@ fn remaining_live_stream_response(
     turn_id: Option<u64>,
     request_body: translate::request::ResponsesRequest,
     mut upstream_sse_body: Vec<u8>,
-    compact_boundary: bool,
+    compaction: LiveStreamCompaction,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     tokio::spawn(async move {
         if tx.send(Ok(Bytes::from(first_chunk))).await.is_err() {
-            abort_request_state(
-                ctx.session_id.as_deref(),
-                turn_id,
-                compact_boundary,
-                &request_body,
-            );
+            abort_request_state(ctx.session_id.as_deref(), turn_id, compaction.attempt);
             return;
         }
         while let Some(item) = upstream_events.recv().await {
@@ -897,8 +860,7 @@ fn remaining_live_stream_response(
                             abort_request_state(
                                 ctx.session_id.as_deref(),
                                 turn_id,
-                                compact_boundary,
-                                &request_body,
+                                compaction.attempt,
                             );
                             let chunk = translator.error_chunk(
                                 &message,
@@ -918,8 +880,7 @@ fn remaining_live_stream_response(
                             abort_request_state(
                                 ctx.session_id.as_deref(),
                                 turn_id,
-                                compact_boundary,
-                                &request_body,
+                                compaction.attempt,
                             );
                             return;
                         }
@@ -928,20 +889,16 @@ fn remaining_live_stream_response(
                         update_continuation_from_upstream(
                             ctx.session_id.as_deref(),
                             turn_id,
+                            compaction.attempt,
                             &request_body,
                             &upstream_sse_body,
-                            compact_boundary,
+                            compaction.compact_boundary,
                         );
                         return;
                     }
                 }
                 Err(err) => {
-                    abort_request_state(
-                        ctx.session_id.as_deref(),
-                        turn_id,
-                        compact_boundary,
-                        &request_body,
-                    );
+                    abort_request_state(ctx.session_id.as_deref(), turn_id, compaction.attempt);
                     let chunk =
                         translator.finish_after_closed_completed_tool_call(ctx.traffic.as_deref());
                     if !chunk.is_empty() {
@@ -964,12 +921,7 @@ fn remaining_live_stream_response(
             }
         }
 
-        abort_request_state(
-            ctx.session_id.as_deref(),
-            turn_id,
-            compact_boundary,
-            &request_body,
-        );
+        abort_request_state(ctx.session_id.as_deref(), turn_id, compaction.attempt);
         let chunk = translator.finish_after_closed_completed_tool_call(ctx.traffic.as_deref());
         if !chunk.is_empty() {
             record_live_stream_progress(&ctx, &chunk);
@@ -1145,6 +1097,7 @@ fn codex_stream_error_type(err: &client::CodexError) -> &'static str {
 fn update_continuation_from_upstream(
     session_id: Option<&str>,
     turn_id: Option<u64>,
+    compaction_attempt: Option<CompactionAttempt>,
     request_body: &translate::request::ResponsesRequest,
     upstream_body: &[u8],
     compact_boundary: bool,
@@ -1152,7 +1105,12 @@ fn update_continuation_from_upstream(
     match finish_metadata_from_upstream(upstream_body) {
         Ok(Some(finish)) if finish.continuation_eligible => {
             if compact_boundary {
-                activate_compaction(session_id, &request_body.model, &finish.output_items);
+                activate_compaction(
+                    session_id,
+                    compaction_attempt,
+                    &request_body.model,
+                    &finish.output_items,
+                );
             }
             record_continuation(
                 session_id,
@@ -1163,7 +1121,7 @@ fn update_continuation_from_upstream(
             );
         }
         _ => {
-            abort_compaction_attempt(session_id, compact_boundary, request_body);
+            abort_compaction_attempt(session_id, compaction_attempt);
             abort_continuation(session_id, turn_id);
         }
     }
