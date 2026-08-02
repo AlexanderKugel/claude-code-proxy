@@ -3,6 +3,13 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
+## v0.1.32 (2026-08-03)
+
+- Kimi subagents and multimodal messages with mixed text and images work instead
+  of failing with an invalid content-part error.
+  ([#98](https://github.com/raine/claude-code-proxy/issues/98),
+  [#99](https://github.com/raine/claude-code-proxy/pull/99))
+
 ## v0.1.31 (2026-08-02)
 
 - OpenCode Go subscriptions can power Claude Code with supported OpenAI, Google,
