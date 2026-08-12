@@ -3,6 +3,10 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
+## v0.1.34 (2026-08-12)
+
+- Grok users can select Grok 4.6 with the `grok-4.6` model name.
+
 ## v0.1.33 (2026-08-11)
 
 - OpenCode Go users can select GLM 5, Kimi K2.5, Qwen 3.8 Max, and Qwen 3.5
