@@ -454,6 +454,65 @@ pub fn warn_grok_tool_image_mode_once(log: &crate::logging::Logger) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Grok hosted-search policy (CCP_GROK_HOSTED_SEARCH)
+// ---------------------------------------------------------------------------
+
+/// Whether the Grok translator replaces the caller's own search tools with
+/// xAI's hosted search, and forces their use.
+///
+/// Off is the default. The caller keeps every tool it declared, including its
+/// client-side `WebSearch`, and the system prompt is left alone. xAI's
+/// `x_search` is still offered on an X turn, because Claude Code has no X tool
+/// of its own and the index is unreachable otherwise -- offered, never forced.
+///
+/// On restores the original behaviour: hosted tools replace the caller's search
+/// tools, two directives are appended to the system prompt, and an explicit
+/// search turn pins `tool_choice: required`. Useful when xAI's own search and
+/// citations are wanted more than the caller's control of its tool set.
+///
+/// Set `CCP_GROK_HOSTED_SEARCH` to `1`, `on`, or `true` to turn it on.
+pub fn parse_grok_hosted_search(raw: Option<&str>) -> bool {
+    matches!(raw.map(str::trim), Some("1" | "on" | "true"))
+}
+
+pub fn grok_hosted_search() -> bool {
+    parse_grok_hosted_search(std::env::var("CCP_GROK_HOSTED_SEARCH").ok().as_deref())
+}
+
+// ---------------------------------------------------------------------------
+// Grok hosted-search block shape (CCP_GROK_SEARCH_BLOCKS)
+// ---------------------------------------------------------------------------
+
+/// How a hosted search that xAI ran is reported back to the client.
+///
+/// `Text` is the default: one short `text` block naming the query. Every
+/// Anthropic client can draw a text block.
+///
+/// `Native` emits the Anthropic server-tool shape, `server_tool_use` followed
+/// by `web_search_tool_result` or `x_search_tool_result`. It is the more
+/// faithful translation, and the Claude Code CLI accepts it, but the Claude
+/// Code VS Code webview has no renderer for either type and prints
+/// "Unsupported content type" once per block. Choose it only for a client
+/// known to draw them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrokSearchBlocks {
+    Text,
+    Native,
+}
+
+pub fn parse_grok_search_blocks(raw: Option<&str>) -> GrokSearchBlocks {
+    match raw.map(str::trim) {
+        Some("native") => GrokSearchBlocks::Native,
+        // Any unknown or empty value degrades to the shape everything renders.
+        _ => GrokSearchBlocks::Text,
+    }
+}
+
+pub fn grok_search_blocks() -> GrokSearchBlocks {
+    parse_grok_search_blocks(std::env::var("CCP_GROK_SEARCH_BLOCKS").ok().as_deref())
+}
+
 struct ResolvedOpenCodeConfig {
     api_key: Option<String>,
     api_key_source: Option<&'static str>,

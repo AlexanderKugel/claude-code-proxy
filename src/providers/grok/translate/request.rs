@@ -136,39 +136,72 @@ pub fn translate_request_with_mode(
     model: String,
     image_mode: GrokToolImageMode,
 ) -> anyhow::Result<GrokResponsesRequest> {
+    translate_request_with_options(req, model, image_mode, crate::config::grok_hosted_search())
+}
+
+/// `hosted_search` selects how xAI's hosted search tools reach the model. Off,
+/// the default, offers `x_search` on an X turn and changes nothing else. On,
+/// the hosted tools replace the caller's search tools and an explicit search
+/// turn is forced. See `crate::config::grok_hosted_search`. Tests pass the flag
+/// directly so neither path depends on the environment.
+pub fn translate_request_with_options(
+    req: &MessagesRequest,
+    model: String,
+    image_mode: GrokToolImageMode,
+    hosted_search: bool,
+) -> anyhow::Result<GrokResponsesRequest> {
     reject_unknown_top_level(req)?;
     let mut instructions = parse_system(req.extra.get("system"))?;
-    let mut tools = parse_tools(req.extra.get("tools"))?;
+    let mut tools = parse_tools(req.extra.get("tools"), hosted_search)?;
     let hosted_web_search = tools
         .as_ref()
         .is_some_and(|tools| tools.iter().any(|tool| tool.kind == "web_search"));
     let dedicated_x_search = tools
         .as_ref()
         .is_some_and(|tools| tools.iter().any(|tool| tool.kind == "x_search"));
-    let x_search_intent = requests_x_search(req);
-    let force_x_search = dedicated_x_search || x_search_intent;
-    let force_web_search = !force_x_search && hosted_web_search && requests_web_search(req);
-    if force_x_search {
-        tools = Some(vec![GrokTool::hosted("x_search")]);
-    } else if force_web_search {
-        tools = Some(vec![GrokTool::hosted("web_search")]);
-    } else {
+    let mut forced_hosted_tool = false;
+    if hosted_search {
+        // Opt-in path. xAI's hosted tools replace the caller's search tools,
+        // the model is told to prefer them, and an explicit search turn pins
+        // tool_choice. Kept for callers who want xAI's own search and
+        // citations, and who run a client that draws hosted-search blocks.
+        let force_x_search = dedicated_x_search || requests_x_search(req);
+        let force_web_search = !force_x_search && hosted_web_search && requests_web_search(req);
+        if force_x_search {
+            tools = Some(vec![GrokTool::hosted("x_search")]);
+        } else if force_web_search {
+            tools = Some(vec![GrokTool::hosted("web_search")]);
+        } else {
+            let tools = tools.get_or_insert_default();
+            if !tools.iter().any(|tool| tool.kind == "x_search") {
+                tools.push(GrokTool::hosted("x_search"));
+            }
+        }
+        if hosted_web_search {
+            append_guidance(
+                &mut instructions,
+                "For general web searches, use the hosted web_search tool. Do not use shell commands, HTTP clients, or local tools to search the web.",
+            );
+        }
+        if force_x_search {
+            append_guidance(
+                &mut instructions,
+                "For requests to search X or Twitter, use the hosted x_search tool. XSearch accepts a query and supports allowed_x_handles, excluded_x_handles, from_date, and to_date filters. Do not use Bash, curl, HTTP clients, or general web_search for X searches.",
+            );
+        }
+        forced_hosted_tool = force_x_search || force_web_search;
+    } else if requests_x_search(req) {
+        // Default path. Claude Code has no X tool of its own, so xAI's index is
+        // only reachable if the proxy attaches it. Offer it as one more tool
+        // beside the caller's own, and stop there: no tool is removed, the
+        // system prompt is not written to, and tool_choice stays whatever the
+        // caller sent. The model decides whether the turn wants X.
         let tools = tools.get_or_insert_default();
         if !tools.iter().any(|tool| tool.kind == "x_search") {
             tools.push(GrokTool::hosted("x_search"));
         }
     }
-    if hosted_web_search {
-        append_guidance(
-            &mut instructions,
-            "For general web searches, use the hosted web_search tool. Do not use shell commands, HTTP clients, or local tools to search the web.",
-        );
-    }
-    append_guidance(
-        &mut instructions,
-        "For requests to search X or Twitter, use the hosted x_search tool. XSearch accepts a query and supports allowed_x_handles, excluded_x_handles, from_date, and to_date filters. Do not use Bash, curl, HTTP clients, or general web_search for X searches.",
-    );
-    let tool_choice = if force_x_search || force_web_search {
+    let tool_choice = if forced_hosted_tool {
         Some(GrokToolChoice::Required("required".into()))
     } else {
         parse_tool_choice(req.extra.get("tool_choice"), tools.as_ref())?
@@ -405,7 +438,10 @@ fn parse_system(value: Option<&Value>) -> anyhow::Result<Option<String>> {
     }
 }
 
-fn parse_tools(value: Option<&Value>) -> anyhow::Result<Option<Vec<GrokTool>>> {
+fn parse_tools(
+    value: Option<&Value>,
+    hosted_search: bool,
+) -> anyhow::Result<Option<Vec<GrokTool>>> {
     let Some(value) = value else { return Ok(None) };
     let tools = value
         .as_array()
@@ -423,6 +459,15 @@ fn parse_tools(value: Option<&Value>) -> anyhow::Result<Option<Vec<GrokTool>>> {
                 "input_schema",
                 "cache_control",
                 "eager_input_streaming",
+                // Claude Code caps its own WebSearch with `max_uses`. The cap
+                // is enforced by the caller that declared it, so the field is
+                // accepted and dropped rather than forwarded. Rejecting it
+                // failed the whole request with a 400 and left the turn with
+                // no search at all.
+                "max_uses",
+                // Anthropic's server-tool declarations carry a versioned
+                // `type` instead of an input schema. Handled below.
+                "type",
             ]
             .contains(&key.as_str())
             {
@@ -446,11 +491,33 @@ fn parse_tools(value: Option<&Value>) -> anyhow::Result<Option<Vec<GrokTool>>> {
         if !names.insert(name.to_string()) {
             anyhow::bail!("duplicate tool name");
         }
-        if name == "WebSearch" {
+        // Anthropic's server-tool declaration. Claude Code sends
+        // {"type":"web_search_20250305","name":"web_search","max_uses":8} the
+        // moment the model actually searches, and the tool carries no
+        // input_schema, so it cannot take the function path below. This is the
+        // caller explicitly asking for server-side search, so honour it with
+        // xAI's hosted tool whatever `hosted_search` says -- that setting
+        // governs whether the proxy seizes search on its own initiative, not
+        // whether it obeys a caller that asked. Rejecting the declaration
+        // failed the turn with "unsupported tool field: type".
+        if let Some(kind) = obj.get("type").and_then(Value::as_str) {
+            // Match the declaration exactly, name included. A prefix match
+            // would map any future `web_search_*` version, and any tool that
+            // merely carried such a type, onto xAI's hosted search.
+            if kind == "web_search_20250305" && name == "web_search" {
+                out.push(GrokTool::hosted("web_search"));
+                continue;
+            }
+            anyhow::bail!("unsupported tool type: {kind}");
+        }
+        // Only claim the caller's own search tools when hosted search is on.
+        // With hosted search off they fall through to the generic branch below
+        // and stay ordinary function tools, so the caller executes them itself.
+        if hosted_search && name == "WebSearch" {
             out.push(GrokTool::hosted("web_search"));
             continue;
         }
-        if name == "XSearch" {
+        if hosted_search && name == "XSearch" {
             out.push(GrokTool::hosted("x_search"));
             continue;
         }
@@ -1122,6 +1189,35 @@ fn flush_message(role: &str, content: &mut Vec<GrokContentPart>, out: &mut Vec<G
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Translate with an explicit hosted-search setting. Reading
+    /// `CCP_GROK_HOSTED_SEARCH` from the environment would make these tests
+    /// depend on the shell that ran them, so they pass the flag directly.
+    fn translate_search(
+        req: &MessagesRequest,
+        model: &str,
+        hosted_search: bool,
+    ) -> serde_json::Value {
+        serde_json::to_value(
+            translate_request_with_options(
+                req,
+                model.into(),
+                crate::config::GrokToolImageMode::Omit,
+                hosted_search,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn translate_hosted(req: &MessagesRequest, model: &str) -> serde_json::Value {
+        translate_search(req, model, true)
+    }
+
+    fn translate_client_search(req: &MessagesRequest, model: &str) -> serde_json::Value {
+        translate_search(req, model, false)
+    }
+
     #[test]
     fn grok_translation_replays_hosted_search_history() {
         let request: MessagesRequest = serde_json::from_value(serde_json::json!({
@@ -1176,8 +1272,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let translated =
-            serde_json::to_value(translate_request(&request, "grok-4.5".into()).unwrap()).unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
         assert_eq!(
             translated["tools"],
             serde_json::json!([{"type":"web_search"}])
@@ -1192,6 +1287,30 @@ mod tests {
     }
 
     #[test]
+    fn grok_translation_keeps_client_web_search_tool_by_default() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"search online for the project"}],
+            "tools":[{
+                "name":"WebSearch",
+                "description":"Search the web",
+                "input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+            }]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        // The caller's own tool survives as a plain function, so the search
+        // comes back as tool_use / tool_result. Hosted search would instead
+        // return server_tool_use and web_search_tool_result, which the VS Code
+        // webview cannot draw.
+        assert_eq!(translated["tools"][0]["type"], "function");
+        assert_eq!(translated["tools"][0]["name"], "WebSearch");
+        assert_eq!(translated["tools"].as_array().unwrap().len(), 1);
+        assert!(!translated.to_string().contains("\"web_search\""));
+        assert!(!translated.to_string().contains("\"x_search\""));
+    }
+
+    #[test]
     fn grok_translation_maps_x_intent_to_required_hosted_x_search() {
         let request: MessagesRequest = serde_json::from_value(serde_json::json!({
             "model":"grok-4.5",
@@ -1202,14 +1321,51 @@ mod tests {
             ]
         }))
         .unwrap();
-        let translated =
-            serde_json::to_value(translate_request(&request, "grok-4.5".into()).unwrap()).unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
         assert_eq!(
             translated["tools"],
             serde_json::json!([{"type":"x_search"}])
         );
         assert_eq!(translated["tool_choice"], "required");
         assert!(!translated.to_string().contains("\"name\":\"Bash\""));
+    }
+
+    #[test]
+    fn grok_translation_offers_x_search_without_forcing_it() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"Search X for recent posts mentioning claude-code-proxy"}],
+            "tools":[
+                {"name":"Bash","description":"Run a command","input_schema":{"type":"object"}},
+                {"name":"WebSearch","description":"Search the web","input_schema":{"type":"object","properties":{"query":{"type":"string"}}}}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        // xAI's X index has no client-side equivalent, so the turn gets it as
+        // one more tool. Everything the caller declared is still there, the
+        // system prompt is untouched, and nothing is pinned: the model picks.
+        let tools = translated["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        assert!(tools.iter().any(|t| t["name"] == "Bash"));
+        assert!(tools.iter().any(|t| t["name"] == "WebSearch"));
+        assert!(tools.iter().any(|t| t["type"] == "x_search"));
+        assert!(translated["tool_choice"].is_null());
+        assert!(!translated.to_string().contains("use the hosted x_search"));
+    }
+
+    #[test]
+    fn grok_translation_offers_no_x_search_without_x_intent() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"read the config file"}],
+            "tools":[{"name":"Bash","description":"Run a command","input_schema":{"type":"object"}}]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        // A turn that never mentions X pays nothing for the capability.
+        assert_eq!(translated["tools"].as_array().unwrap().len(), 1);
+        assert!(!translated.to_string().contains("x_search"));
     }
 
     #[test]
@@ -1234,13 +1390,104 @@ mod tests {
             }]
         }))
         .unwrap();
-        let translated =
-            serde_json::to_value(translate_request(&request, "grok-4.5".into()).unwrap()).unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
         assert_eq!(
             translated["tools"],
             serde_json::json!([{"type":"x_search"}])
         );
         assert_eq!(translated["tool_choice"], "required");
+    }
+
+    #[test]
+    fn grok_translation_omits_x_search_guidance_without_x_intent() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "system":"rules",
+            "messages":[{"role":"user","content":"hi"}]
+        }))
+        .unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
+        // A greeting must reach the model with the caller's system prompt intact:
+        // no appended tool directive, so nothing sits in the highest-recency slot
+        // telling the model to go search.
+        assert_eq!(translated["instructions"], "rules");
+        // The tool stays available; only the standing instruction to use it is gone.
+        assert_eq!(
+            translated["tools"],
+            serde_json::json!([{"type":"x_search"}])
+        );
+        assert!(translated["tool_choice"].is_null());
+    }
+
+    #[test]
+    fn grok_translation_attaches_no_search_tool_to_a_greeting_by_default() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "system":"rules",
+            "messages":[{"role":"user","content":"hi"}]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        // No standing x_search tool, so a greeting gives the model nothing to
+        // search with and the reply carries no hosted-search blocks.
+        assert_eq!(translated["instructions"], "rules");
+        assert!(translated["tools"].as_array().is_none_or(|t| t.is_empty()));
+        assert!(translated["tool_choice"].is_null());
+    }
+
+    #[test]
+    fn grok_translation_appends_x_search_guidance_on_x_intent() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "system":"rules",
+            "messages":[{"role":"user","content":"search twitter for the outage"}]
+        }))
+        .unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
+        let instructions = translated["instructions"].as_str().unwrap();
+        assert!(instructions.starts_with("rules"));
+        assert!(instructions.contains("use the hosted x_search tool"));
+    }
+
+    #[test]
+    fn grok_translation_appends_x_search_guidance_for_dedicated_x_tool() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "system":"rules",
+            "messages":[{"role":"user","content":"hi"}],
+            "tools":[{
+                "name":"XSearch",
+                "description":"Search X posts",
+                "input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+            }]
+        }))
+        .unwrap();
+        let translated = translate_hosted(&request, "grok-4.5");
+        assert!(
+            translated["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("use the hosted x_search tool")
+        );
+    }
+
+    #[test]
+    fn grok_translation_keeps_dedicated_xsearch_as_a_function_by_default() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "system":"rules",
+            "messages":[{"role":"user","content":"hi"}],
+            "tools":[{
+                "name":"XSearch",
+                "description":"Search X posts",
+                "input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+            }]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        assert_eq!(translated["tools"][0]["type"], "function");
+        assert_eq!(translated["tools"][0]["name"], "XSearch");
+        assert_eq!(translated["instructions"], "rules");
     }
 
     #[test]
@@ -1383,6 +1630,116 @@ mod tests {
             ]));
             assert!(translate_request(&request, "grok-4.5".into()).is_err());
         }
+    }
+
+    #[test]
+    fn grok_translation_accepts_web_search_max_uses_without_forwarding_it() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"find it"}],
+            "tools":[{
+                "name":"WebSearch",
+                "description":"Search the web",
+                "max_uses":6,
+                "input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+            }]
+        }))
+        .unwrap();
+        // Claude Code sends this field on its own WebSearch. Rejecting it
+        // failed the request with a 400 and the turn got no search at all.
+        let translated = translate_client_search(&request, "grok-4.5");
+        assert_eq!(translated["tools"][0]["name"], "WebSearch");
+        // The cap belongs to the caller that declared it, so it is not relayed.
+        assert!(!translated.to_string().contains("max_uses"));
+    }
+
+    #[test]
+    fn grok_translation_maps_the_anthropic_server_web_search_declaration() {
+        // The exact shape captured from Claude Code 2.1.220 when the model
+        // searches: no input_schema, a versioned type, and a use cap.
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"find it"}],
+            "tools":[
+                {"name":"Bash","description":"Run a command","input_schema":{"type":"object"}},
+                {"type":"web_search_20250305","name":"web_search","max_uses":8}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_client_search(&request, "grok-4.5");
+        let tools = translated["tools"].as_array().unwrap();
+        // The caller asked for server-side search, so it gets xAI's hosted
+        // tool. Its other tools are untouched.
+        assert_eq!(tools.len(), 2);
+        assert!(tools.iter().any(|t| t["name"] == "Bash"));
+        assert!(tools.iter().any(|t| t["type"] == "web_search"));
+        assert!(!translated.to_string().contains("web_search_20250305"));
+        assert!(!translated.to_string().contains("max_uses"));
+    }
+
+    #[test]
+    fn grok_translation_rejects_an_unknown_server_tool_type() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"run it"}],
+            "tools":[{"type":"code_execution_20260120","name":"code_execution"}]
+        }))
+        .unwrap();
+        let error = translate_request_with_options(
+            &request,
+            "grok-4.5".into(),
+            crate::config::GrokToolImageMode::Omit,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "unsupported tool type: code_execution_20260120");
+    }
+
+    #[test]
+    fn grok_translation_rejects_a_server_tool_type_it_does_not_know_exactly() {
+        // A future version, and the right version under someone else's name,
+        // both stay rejected. Only the declaration Anthropic documents maps to
+        // xAI's hosted search.
+        for (kind, name) in [
+            ("web_search_20991231", "web_search"),
+            ("web_search_20250305", "MyOwnSearch"),
+        ] {
+            let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+                "model":"grok-4.5",
+                "messages":[{"role":"user","content":"find it"}],
+                "tools":[{"type":kind,"name":name}]
+            }))
+            .unwrap();
+            let error = translate_request_with_options(
+                &request,
+                "grok-4.5".into(),
+                crate::config::GrokToolImageMode::Omit,
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert_eq!(error, format!("unsupported tool type: {kind}"));
+        }
+    }
+
+    #[test]
+    fn grok_translation_still_rejects_an_unknown_tool_field() {
+        let request: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"grok-4.5",
+            "messages":[{"role":"user","content":"find it"}],
+            "tools":[{"name":"WebSearch","input_schema":{"type":"object"},"invented":1}]
+        }))
+        .unwrap();
+        let error = translate_request_with_options(
+            &request,
+            "grok-4.5".into(),
+            crate::config::GrokToolImageMode::Omit,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "unsupported tool field: invented");
     }
 
     #[test]
