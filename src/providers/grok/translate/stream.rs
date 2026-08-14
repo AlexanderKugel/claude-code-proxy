@@ -454,7 +454,6 @@ mod tests {
         assert!(output.contains("https://example.com"));
         assert!(output.contains("\"web_search_requests\":1"));
 
-        // The default shape says the same thing in a block every client draws.
         let text = String::from_utf8(
             translate_stream_bytes_with_blocks(input, "msg_1", "grok-4.5", GrokSearchBlocks::Text)
                 .unwrap(),
@@ -511,9 +510,6 @@ mod tests {
         assert!(output.contains("\"x_search_requests\":1"));
         assert!(!output.contains("\"name\":\"Bash\""));
 
-        // X search stays fully usable under the default shape. It is the one
-        // hosted tool with no client-side equivalent, so losing it would cost
-        // a real capability rather than a rendering.
         let text = String::from_utf8(
             translate_stream_bytes_with_blocks(input, "msg_1", "grok-4.5", GrokSearchBlocks::Text)
                 .unwrap(),

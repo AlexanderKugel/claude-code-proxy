@@ -38,20 +38,20 @@ The proxy translates Claude messages, function tools, tool results, thinking con
 
 Search reaches Grok-native tools when the caller asks for it:
 
-- A caller that declares Anthropic's hosted `web_search` tool gets Grok hosted
-  web search.
-- A caller that runs its own search tool keeps it. The proxy does not replace a
-  client-side search tool with a hosted one.
+- Anthropic's `web_search_20250305` declaration maps to Grok hosted web search.
+  The Grok CLI endpoint accepts the minimal declaration without domain or
+  location constraints.
+- A caller-managed search tool remains a function tool for the caller to run.
 - An X or Twitter query is additionally offered hosted `x_search`, which the
-  model can use or ignore. It never replaces the caller's other tools.
+  model can use or ignore alongside the caller's tools.
 - Citations and search usage return in Anthropic-compatible usage fields.
-- `CCP_GROK_HOSTED_SEARCH=1` restores the previous behaviour, in which hosted
-  tools replace the caller's search tools and an explicit search turn is forced.
+- `CCP_GROK_HOSTED_SEARCH=1` enables a policy where hosted tools replace caller
+  search tools and explicit search turns require a tool call.
 
-A hosted search is reported as a text block naming the query, which every
-Anthropic client can draw. `CCP_GROK_SEARCH_BLOCKS=native` reports it as
-`server_tool_use` plus `web_search_tool_result` or `x_search_tool_result`
-instead, for a client that renders those block types.
+A hosted search is reported as a text block naming the query.
+`CCP_GROK_SEARCH_BLOCKS=native` preserves `server_tool_use` plus
+`web_search_tool_result` or `x_search_tool_result` for clients that consume
+hosted-tool blocks.
 
 ## OpenAI-compatible APIs
 
@@ -81,11 +81,16 @@ Traffic captures redact Anthropic image data and upstream image data URLs.
 - `CCP_GROK_BASE_URL` or `grok.baseUrl` changes the API base URL.
 - `CCP_GROK_CLIENT_VERSION` or `grok.clientVersion` changes the client version header.
 - `CCP_GROK_TOOL_IMAGE` selects `omit`, `reattach`, `inline`, or `reject`.
-- `CCP_GROK_HOSTED_SEARCH` restores hosted search tools replacing the caller's own.
+- `CCP_GROK_HOSTED_SEARCH` enables hosted search replacement and forcing.
 - `CCP_GROK_SEARCH_BLOCKS` selects `text` or `native` hosted-search reporting.
 
 See [Configuration](/reference/configuration/) for defaults.
 
 ## Limitations and troubleshooting
+
+The Grok CLI hosted web-search endpoint has no equivalent for Anthropic's
+`max_uses`, domain filters, or user location. The proxy accepts and omits a
+valid `max_uses` value, while non-null domain and location constraints return a
+request error rather than weakening the requested search scope.
 
 A successful login does not guarantee every model is enabled for the account or region. Model rejection and upstream errors are surfaced to Claude Code. Use `grok auth status` for token state, inspect the failed request in the monitor, and use the structured log or error capture for the full redacted response.

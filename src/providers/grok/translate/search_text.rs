@@ -1,19 +1,11 @@
-//! Text rendering of a hosted search that xAI already ran.
+//! Text projection for hosted searches completed by xAI.
 //!
-//! The faithful translation of hosted search is `server_tool_use` followed by
-//! `web_search_tool_result` or `x_search_tool_result`. Those two block types
-//! are unrenderable in some Anthropic clients -- notably the Claude Code VS
-//! Code webview, whose content-block renderer knows `text`, `thinking`,
-//! `redacted_thinking`, `tool_use`, `tool_result`, `image`, `document`, and
-//! `fallback`, and prints "Unsupported content type" for anything else.
-//!
-//! A `text` block says the same thing and draws everywhere, so it is the
-//! default shape. `CCP_GROK_SEARCH_BLOCKS=native` selects the block types
-//! above instead.
+//! Hosted-tool block support varies across Anthropic clients. The text shape
+//! preserves the search name and query using the baseline content type, while
+//! citations and usage remain attached to the translated response.
 
-/// One line naming a search the model already ran. The result payload is not
-/// included: xAI returns the findings as URL citations on the answer text, not
-/// as a separate result set, so the result block was always empty.
+/// One line naming a completed search. xAI returns findings as citations on the
+/// answer text, so the search event itself has no result payload to include.
 pub fn search_line(name: &str, query: &str) -> String {
     let label = match name {
         "x_search" => "X search",

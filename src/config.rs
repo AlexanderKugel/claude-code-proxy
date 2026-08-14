@@ -458,20 +458,18 @@ pub fn warn_grok_tool_image_mode_once(log: &crate::logging::Logger) {
 // Grok hosted-search policy (CCP_GROK_HOSTED_SEARCH)
 // ---------------------------------------------------------------------------
 
-/// Whether the Grok translator replaces the caller's own search tools with
-/// xAI's hosted search, and forces their use.
+/// Whether the Grok translator replaces caller search tools with xAI-hosted
+/// search and requires hosted tool use on explicit search turns.
 ///
-/// Off is the default. The caller keeps every tool it declared, including its
-/// client-side `WebSearch`, and the system prompt is left alone. xAI's
-/// `x_search` is still offered on an X turn, because Claude Code has no X tool
-/// of its own and the index is unreachable otherwise -- offered, never forced.
+/// The disabled policy preserves caller tools, instructions, and tool choice.
+/// It adds `x_search` only to X-specific turns because the caller has no
+/// equivalent access to xAI's X index.
 ///
-/// On restores the original behaviour: hosted tools replace the caller's search
-/// tools, two directives are appended to the system prompt, and an explicit
-/// search turn pins `tool_choice: required`. Useful when xAI's own search and
-/// citations are wanted more than the caller's control of its tool set.
+/// The enabled policy favors xAI-hosted search and citations. Hosted tools
+/// replace caller search implementations, matching turns receive search
+/// guidance, and explicit search turns use `tool_choice: required`.
 ///
-/// Set `CCP_GROK_HOSTED_SEARCH` to `1`, `on`, or `true` to turn it on.
+/// Set `CCP_GROK_HOSTED_SEARCH` to `1`, `on`, or `true` to enable this policy.
 pub fn parse_grok_hosted_search(raw: Option<&str>) -> bool {
     matches!(raw.map(str::trim), Some("1" | "on" | "true"))
 }
@@ -484,17 +482,13 @@ pub fn grok_hosted_search() -> bool {
 // Grok hosted-search block shape (CCP_GROK_SEARCH_BLOCKS)
 // ---------------------------------------------------------------------------
 
-/// How a hosted search that xAI ran is reported back to the client.
+/// How a hosted search that xAI ran is reported to the client.
 ///
-/// `Text` is the default: one short `text` block naming the query. Every
-/// Anthropic client can draw a text block.
+/// `Text` projects the search query into a standard `text` block.
 ///
-/// `Native` emits the Anthropic server-tool shape, `server_tool_use` followed
-/// by `web_search_tool_result` or `x_search_tool_result`. It is the more
-/// faithful translation, and the Claude Code CLI accepts it, but the Claude
-/// Code VS Code webview has no renderer for either type and prints
-/// "Unsupported content type" once per block. Choose it only for a client
-/// known to draw them.
+/// `Native` preserves the Anthropic server-tool shape: `server_tool_use`
+/// followed by `web_search_tool_result` or `x_search_tool_result`. Select this
+/// shape for clients that consume hosted-tool blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrokSearchBlocks {
     Text,
@@ -504,7 +498,7 @@ pub enum GrokSearchBlocks {
 pub fn parse_grok_search_blocks(raw: Option<&str>) -> GrokSearchBlocks {
     match raw.map(str::trim) {
         Some("native") => GrokSearchBlocks::Native,
-        // Any unknown or empty value degrades to the shape everything renders.
+        // Text is the compatibility-safe fallback for empty or unknown values.
         _ => GrokSearchBlocks::Text,
     }
 }

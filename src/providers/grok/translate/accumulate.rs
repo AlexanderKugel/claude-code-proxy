@@ -250,8 +250,7 @@ mod tests {
             .iter()
             .map(|block| block["type"].as_str().unwrap())
             .collect();
-        // One text block for the search, one for the answer. No block type the
-        // VS Code webview would fail to draw.
+        // One text block represents the search and one contains the answer.
         assert_eq!(types, vec!["text", "text"]);
         assert_eq!(response["content"][0]["text"], "[web search: rust news]\n");
         assert_eq!(
