@@ -3,6 +3,16 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
+## v0.1.35 (2026-08-19)
+
+- Grok web search works reliably with Claude Code, preserves other tools, and
+  renders results across clients.
+  ([#112](https://github.com/raine/claude-code-proxy/pull/112))
+- Grok honors the requested reasoning effort on OpenAI-compatible routes.
+- Codex and OpenCode Go streams handle connection failures, rate-limit updates,
+  and output limits more reliably.
+  ([#103](https://github.com/raine/claude-code-proxy/pull/103))
+
 ## v0.1.34 (2026-08-12)
 
 - Grok users can select Grok 4.6 with the `grok-4.6` model name.
