@@ -3,6 +3,16 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
+## v0.1.36 (2026-08-28)
+
+- Fixes Grok's 400 error on `allowed_domains`, `blocked_domains`, or
+  `user_location`.
+- `CCP_SEARCH_CONSTRAINTS` (`soft` default, `warning`, `hard`) controls that
+  behaviour:
+  - `hard`: legacy HTTP 400
+  - `warning`: continues unrestricted and logs a warning instead of an error
+  - `soft`: instructs Grok to follow the restrictions via system prompt. Not guaranteed, but performs well in a clean controlled testing environment.
+
 ## v0.1.35 (2026-08-19)
 
 - Grok web search works reliably with Claude Code, preserves other tools, and
