@@ -1,0 +1,117 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 1 * * *'
+      timezone: 'Europe/London'
+
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Preview the merge without committing or pushing'
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  sync:
+    if: github.repository == 'AlexanderKugel/claude-code-proxy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: sync-upstream-${{ matrix.branch }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        branch:
+          - main
+          - fix/grok-hosted-search-mapping
+    steps:
+      - name: Generate App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.CCP_SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CCP_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: claude-code-proxy
+          permission-contents: write
+          permission-workflows: write
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ matrix.branch }}
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Merge upstream with changelog-only conflict resolution
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ matrix.branch }}
+          UPSTREAM_URL: https://github.com/raine/claude-code-proxy.git
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          SYNC_AUTHOR: ${{ github.repository_owner }}
+          SYNC_AUTHOR_ID: ${{ github.repository_owner_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "$SYNC_AUTHOR"
+          git config user.email "${SYNC_AUTHOR_ID}+${SYNC_AUTHOR}@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            printf 'Already up to date: %s\n' "$TARGET_BRANCH"
+            exit 0
+          fi
+
+          if ! git merge --no-commit --no-ff upstream/main; then
+            conflicts=$(git diff --name-only --diff-filter=U)
+            printf 'Unresolved files:\n%s\n' "$conflicts"
+            if [[ "$conflicts" != 'CHANGELOG.md' ]]; then
+              printf 'Stopping: only CHANGELOG.md conflicts can be resolved automatically.\n' >&2
+              exit 1
+            fi
+
+            tmp=$(mktemp -d)
+            trap 'rm -rf "$tmp"' EXIT
+            git show :1:CHANGELOG.md > "$tmp/base"
+            git show :2:CHANGELOG.md > "$tmp/ours"
+            git show :3:CHANGELOG.md > "$tmp/theirs"
+            git merge-file --union -p "$tmp/ours" "$tmp/base" "$tmp/theirs" > CHANGELOG.md
+            git add -- CHANGELOG.md
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          text = Path('CHANGELOG.md').read_text()
+          if re.search(r'^(<<<<<<<|=======|>>>>>>>)', text, re.MULTILINE):
+              raise SystemExit('Stopping: changelog still contains conflict markers.')
+          headings = re.findall(r'^## (Unreleased|v\d+\.\d+\.\d+)\b', text, re.MULTILINE)
+          if not headings or len(headings) != len(set(headings)):
+              raise SystemExit('Stopping: missing or duplicate release headings.')
+          if 'Unreleased' in headings and headings[0] != 'Unreleased':
+              raise SystemExit('Stopping: Unreleased must be the first release section.')
+          versions = [tuple(map(int, heading[1:].split('.'))) for heading in headings if heading != 'Unreleased']
+          if versions != sorted(versions, reverse=True):
+              raise SystemExit('Stopping: release sections are not newest first.')
+          PY
+
+          if [[ -n "$(git ls-files -- private private/)" ]]; then
+            printf 'Stopping: private/ must not be published.\n' >&2
+            exit 1
+          fi
+          git diff --cached --check
+          git diff --stat HEAD
+          git diff HEAD -- CHANGELOG.md
+
+          if [[ "$DRY_RUN" == 'true' ]]; then
+            printf 'Dry run succeeded for %s. No commit or push was made.\n' "$TARGET_BRANCH"
+            exit 0
+          fi
+
+          git commit -m "Merge raine/main into $TARGET_BRANCH"
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
