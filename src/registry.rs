@@ -2,6 +2,7 @@ use crate::{
     anthropic::{json_error, schema::MessagesRequest},
     config::AliasProvider,
     provider::{CliHandlers, Provider, RequestContext},
+    providers::codex::translate::model_allowlist::tier_model_variants,
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -51,6 +52,7 @@ pub(crate) const CODEX_MODELS: &[&str] = &[
     "gpt-6-astra",
     "gpt-6-luna",
     "gpt-6-sol",
+    "gpt-6.1-sol",
 ];
 
 pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "kimi-k3", "k2.6", "k3"];
@@ -323,9 +325,10 @@ fn expand_codex_models() -> Vec<String> {
         if set.insert((*model).to_string()) {
             out.push((*model).to_string());
         }
-        let fast = format!("{model}-fast");
-        if set.insert(fast.clone()) {
-            out.push(fast);
+        for variant in tier_model_variants(model) {
+            if set.insert(variant.clone()) {
+                out.push(variant);
+            }
         }
     }
     out.sort_unstable();
@@ -349,6 +352,31 @@ mod tests {
     fn normalize_model_trims_hint() {
         assert_eq!(normalize_incoming_model("gpt-5.4-fast[1m]"), "gpt-5.4-fast");
         assert_eq!(normalize_incoming_model("gpt-5.4-fast"), "gpt-5.4-fast");
+        assert_eq!(
+            normalize_incoming_model("gpt-6-astra-ultrafast[1m]"),
+            "gpt-6-astra-ultrafast"
+        );
+    }
+
+    #[test]
+    fn ultrafast_variant_routes_to_codex_only_where_offered() {
+        let registry = Registry::new(AliasProvider::Codex);
+        for model in [
+            "gpt-6-astra-ultrafast",
+            "gpt-6-astra-ultrafast[1m]",
+            "gpt-6.1-sol-ultrafast",
+        ] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                "codex"
+            );
+        }
+        for model in ["gpt-6-sol-ultrafast", "gpt-6-luna-ultrafast"] {
+            assert!(
+                registry.provider_for_model(model, None).is_none(),
+                "{model}"
+            );
+        }
     }
 
     #[test]
@@ -422,9 +450,15 @@ mod tests {
     }
 
     #[test]
-    fn gpt_6_sol_and_luna_route_to_codex() {
+    fn gpt_6_models_route_to_codex() {
         let registry = Registry::new(AliasProvider::Codex);
-        for model in ["gpt-6-sol", "gpt-6-sol-fast", "gpt-6-luna"] {
+        for model in [
+            "gpt-6-sol",
+            "gpt-6-sol-fast",
+            "gpt-6-luna",
+            "gpt-6.1-sol",
+            "gpt-6.1-sol-fast",
+        ] {
             assert_eq!(
                 registry.provider_for_model(model, None).unwrap().name(),
                 "codex"

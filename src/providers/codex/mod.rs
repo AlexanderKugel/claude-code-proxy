@@ -51,7 +51,7 @@ use self::translate::accumulate::accumulate_response_with_traffic;
 use self::translate::live_stream::LiveStreamTranslator;
 use self::translate::model_allowlist::{
     assert_allowed_model, full_lane_web_search_model, resolve_model_request_with_config_override,
-    uses_responses_lite,
+    tier_model_variants, uses_responses_lite,
 };
 use self::translate::reducer::finish_metadata_from_upstream;
 use self::translate::request::{
@@ -532,7 +532,7 @@ impl Provider for CodexProvider {
             .map(|m| m.to_string())
             .collect();
         for m in registry::CODEX_MODELS {
-            models.push(format!("{m}-fast"));
+            models.extend(tier_model_variants(m));
         }
         models.sort_unstable();
         models.dedup();
@@ -1481,7 +1481,17 @@ fn map_codex_error_to_response(err: &client::CodexError) -> Response {
         return map_codex_failure_to_response(message);
     }
     if err.detail.as_deref() == Some(EMPTY_CODEX_COMPLETION_DETAIL) {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "api_error", &err.message);
+        // The proxy has already spent its own retry budget on this request, so
+        // a client retry only multiplies it: Claude Code resends a 503 up to
+        // ten times, each one repeating the proxy's full retry loop.
+        return (
+            [(
+                HeaderName::from_static("x-should-retry"),
+                HeaderValue::from_static("false"),
+            )],
+            json_error(StatusCode::SERVICE_UNAVAILABLE, "api_error", &err.message),
+        )
+            .into_response();
     }
 
     match err.status {
@@ -2073,8 +2083,14 @@ mod tests {
         assert!(models.contains(&"gpt-6-sol".to_string()));
         assert!(models.contains(&"gpt-6-sol-fast".to_string()));
         assert!(models.contains(&"gpt-6-luna".to_string()));
+        assert!(models.contains(&"gpt-6.1-sol".to_string()));
+        assert!(models.contains(&"gpt-6.1-sol-fast".to_string()));
+        assert!(models.contains(&"gpt-6.1-sol-ultrafast".to_string()));
         assert!(models.contains(&"gpt-5.4".to_string()));
         assert!(models.contains(&"gpt-5.4-mini".to_string()));
+        assert!(models.contains(&"gpt-6-astra-fast".to_string()));
+        assert!(models.contains(&"gpt-6-astra-ultrafast".to_string()));
+        assert!(!models.contains(&"gpt-6-sol-ultrafast".to_string()));
     }
 
     #[test]
@@ -2160,10 +2176,9 @@ mod tests {
 
         assert_eq!(err.status, 503);
         assert_eq!(err.detail.as_deref(), Some(EMPTY_CODEX_COMPLETION_DETAIL));
-        assert_eq!(
-            map_codex_error_to_response(&err).status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
+        let response = map_codex_error_to_response(&err);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["x-should-retry"], "false");
     }
 
     #[test]
